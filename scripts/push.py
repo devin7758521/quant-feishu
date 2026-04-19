@@ -432,6 +432,12 @@ def build_feishu_card(vix_data, scored_stocks, push_type):
     })
     elements.append({"tag": "hr"})
 
+    # ── 选股播报关键词（飞书 Webhook 关键词过滤必须匹配）─────────────────────
+    elements.append({
+        "tag": "div",
+        "text": {"tag": "lark_md", "content": "📌 **选股播报消息** · 量化评分引擎"}
+    })
+
     # ── TOP10 排名 ───────────────────────────────────────────────────────────
     elements.append({
         "tag": "div",
