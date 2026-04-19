@@ -583,7 +583,7 @@ def build_feishu_text(vix_data, scored_stocks, push_type):
             lines.append(f"  ▸ {p}")
         lines.append("")
 
-    lines.append(f"⏰ {now_bjt} 北京时间 · 选股播报 · 数据仅供参考")
+    lines.append(f"⏰ {now_bjt} 北京时间 · 选股播报推送 · 数据仅供参考")
     return "\n".join(lines)
 
 # ─── 推送飞书 ─────────────────────────────────────────────────────────────────
