@@ -155,36 +155,57 @@ def fetch_vix():
     return None
 
 def fetch_quotes_twelvedata():
-    """Twelve Data 批量行情"""
-    tickers = [s["ticker"].replace("BRK-B", "BRK/B") for s in UNIVERSE]
-    url = f"https://api.twelvedata.com/quote?symbol={','.join(tickers)}&apikey={TWELVE_DATA_KEY}"
-    r = requests.get(url, timeout=30)
-    data = r.json()
+    """Twelve Data 分批行情（每批最多8只，遵守免费版8次/分钟限制）"""
+    BATCH_SIZE = 8
     result = {}
-    for s in UNIVERSE:
-        td_key = s["ticker"].replace("BRK-B", "BRK/B")
-        q = data.get(td_key) or data.get(td_key.replace("/", ":"))
-        if not q or q.get("status") == "error":
-            continue
+    ticker_list = [s["ticker"].replace("BRK-B", "BRK/B") for s in UNIVERSE]
+    ticker_to_stock = {s["ticker"].replace("BRK-B", "BRK/B"): s for s in UNIVERSE}
+
+    for i in range(0, len(ticker_list), BATCH_SIZE):
+        batch = ticker_list[i:i + BATCH_SIZE]
+        sym = ",".join(batch)
+        url = f"https://api.twelvedata.com/quote?symbol={sym}&apikey={TWELVE_DATA_KEY}"
         try:
-            result[s["ticker"]] = {
-                "price":      float(q.get("close") or 0),
-                "change_pct": float(q.get("percent_change") or 0),
-                "high52w":    float(q.get("fifty_two_week", {}).get("high") or 0),
-                "low52w":     float(q.get("fifty_two_week", {}).get("low") or 0),
-                "pe":         float(q.get("pe") or 0) or None,
-                "volume":     int(q.get("volume") or 0),
-            }
-        except Exception:
-            continue
+            r = requests.get(url, timeout=30)
+            data = r.json()
+            # 整体错误（如限流、key无效）
+            if data.get("status") == "error" and "code" in data:
+                print(f"Twelve Data batch error: {data.get('message', '')[:120]}")
+                time.sleep(8)
+                continue
+            for td_key in batch:
+                stock = ticker_to_stock.get(td_key)
+                if not stock:
+                    continue
+                q = data.get(td_key) or data.get(td_key.replace("/", ":"))
+                if not q or q.get("status") == "error":
+                    continue
+                try:
+                    result[stock["ticker"]] = {
+                        "price":      float(q.get("close") or 0),
+                        "change_pct": float(q.get("percent_change") or 0),
+                        "high52w":    float(q.get("fifty_two_week", {}).get("high") or 0),
+                        "low52w":     float(q.get("fifty_two_week", {}).get("low") or 0),
+                        "pe":         float(q.get("pe") or 0) or None,
+                        "volume":     int(q.get("volume") or 0),
+                    }
+                except Exception:
+                    continue
+        except Exception as e:
+            print(f"Twelve Data batch {i//BATCH_SIZE+1} failed: {e}")
+        # 免费版8次/分钟，每批1次请求，间隔8秒
+        if i + BATCH_SIZE < len(ticker_list):
+            time.sleep(8)
     return result
 
 FINNHUB_SYMBOL_MAP = {"BRK-B": "BRK.B"}
 
-def fetch_quotes_finnhub():
-    """Finnhub 逐个行情（备用），带速率限制"""
+def fetch_quotes_finnhub(missing_tickers):
+    """Finnhub 逐个行情（补缺），带速率限制"""
     result = {}
     for s in UNIVERSE:
+        if s["ticker"] not in missing_tickers:
+            continue
         symbol = FINNHUB_SYMBOL_MAP.get(s["ticker"], s["ticker"])
         try:
             url = f"https://finnhub.io/api/v1/quote?symbol={symbol}&token={FINNHUB_KEY}"
@@ -216,17 +237,18 @@ def fetch_quotes():
             print(f"Twelve Data: {len(quotes)} stocks")
         except Exception as e:
             print(f"Twelve Data failed: {e}")
-    if len(quotes) < len(UNIVERSE) and FINNHUB_KEY:
-        try:
-            finnhub_quotes = fetch_quotes_finnhub()
-            before = len(quotes)
-            for ticker, q in finnhub_quotes.items():
-                if ticker not in quotes:
-                    quotes[ticker] = q
-            added = len(quotes) - before
-            print(f"Finnhub supplemented {added} stocks, total: {len(quotes)}")
-        except Exception as e:
-            print(f"Finnhub failed: {e}")
+    if FINNHUB_KEY:
+        missing = [s["ticker"] for s in UNIVERSE if s["ticker"] not in quotes]
+        if missing:
+            print(f"Finnhub supplementing {len(missing)} missing tickers...")
+            try:
+                finnhub_quotes = fetch_quotes_finnhub(missing)
+                for ticker, q in finnhub_quotes.items():
+                    if ticker not in quotes:
+                        quotes[ticker] = q
+                print(f"After Finnhub: {len(quotes)} stocks total")
+            except Exception as e:
+                print(f"Finnhub failed: {e}")
     return quotes
 
 # ─── 量化评分引擎 ─────────────────────────────────────────────────────────────
