@@ -431,8 +431,61 @@ def fetch_news(vix=None):
 
 # ─── 期权合约建议 ─────────────────────────────────────────────────────────────
 
+# 长桥 LongPort OpenAPI（预留接口，配置后可拉取真实期权链）
+# pip install longbridge
+# 文档: https://open.longportapp.com/en-US/docs/quote/pull/optionchain
+# 需配置环境变量: LONGPORT_APP_KEY, LONGPORT_APP_SECRET, LONGPORT_ACCESS_TOKEN
+LONGPORT_APP_KEY    = os.environ.get("LONGPORT_APP_KEY", "")
+LONGPORT_APP_SECRET = os.environ.get("LONGPORT_APP_SECRET", "")
+LONGPORT_ACCESS_TOKEN = os.environ.get("LONGPORT_ACCESS_TOKEN", "")
+
+def round_strike(price, direction="otm"):
+    """将行权价规整为合法档位：
+    < $25: $0.5倍数 | < $200: $2.5倍数 | < $1000: $5倍数 | >= $1000: $10倍数
+    """
+    if price < 25:
+        step = 0.5
+    elif price < 200:
+        step = 2.5
+    elif price < 1000:
+        step = 5
+    else:
+        step = 10
+    import math
+    if direction == "otm":
+        return math.ceil(price / step) * step
+    elif direction == "itm":
+        return math.floor(price / step) * step
+    else:
+        return round(price / step) * step
+
+def fetch_longport_option_chain(ticker):
+    """长桥 LongPort API 拉取真实期权链（预留接口）
+    配置 LONGPORT_APP_KEY/SECRET/ACCESS_TOKEN 后自动启用
+    返回: list of {strike, expiry, type, bid, ask, iv, delta} 或 None
+    """
+    if not all([LONGPORT_APP_KEY, LONGPORT_APP_SECRET, LONGPORT_ACCESS_TOKEN]):
+        return None
+    try:
+        from longbridge.rest import TradeContext, Config
+        config = Config(LONGPORT_APP_KEY, LONGPORT_APP_SECRET, LONGPORT_ACCESS_TOKEN)
+        ctx = TradeContext(config)
+        # 获取期权链
+        option_chain = ctx.option_chain_expiry_date_list(symbol=f"{ticker}.US")
+        print(f"LongPort option chain for {ticker}: {len(option_chain)} expiries")
+        return option_chain
+    except ImportError:
+        print("longbridge SDK not installed, skip real option data")
+        return None
+    except Exception as e:
+        print(f"LongPort API failed: {e}")
+        return None
+
 def build_option_picks(scored_stocks, vix):
-    """根据评分+VIX给出具体期权合约建议（前3只强买/买入股）"""
+    """根据评分+VIX给出具体期权合约建议（前3只强买/买入股）
+    支持短/中/长三档期限，行权价规整为合法档位
+    配置 LongPort 后可拉取真实期权链数据
+    """
     buys = [s for s in scored_stocks if s["score"] > 58][:3]
     if not buys:
         return []
@@ -443,25 +496,34 @@ def build_option_picks(scored_stocks, vix):
         score = s["score"]
         direction = "bull" if score > 65 else "neutral"
 
-        # 根据价格估算期权建议
+        # 尝试拉取真实期权链
+        real_chain = fetch_longport_option_chain(ticker)
+
         if direction == "bull":
             if vix < 25:
-                # 低IV：买入Call，选略OTM降低成本
-                strike = round(price * 1.02, 2) if price > 100 else round(price * 1.05, 1)
-                pick = f"{ticker} 买入Call 行权${strike} 期限30-45天"
+                # 低IV：买入Call
+                strike_short = round_strike(price * 1.02, "otm")   # 略OTM
+                strike_mid   = round_strike(price * 1.03, "otm")
+                strike_long  = round_strike(price * 1.05, "otm")
+                picks.append(f"{ticker} 买入Call ${strike_short}/30天 | ${strike_mid}/60天 | ${strike_long}/90天")
             else:
-                # 高IV：Bull Call Spread降低成本
-                s1 = round(price * 0.98, 2) if price > 100 else round(price * 0.98, 1)
-                s2 = round(price * 1.05, 2) if price > 100 else round(price * 1.05, 1)
-                pick = f"{ticker} Bull Call Spread ${s1}/${s2} 期限30-45天"
+                # 高IV：Bull Call Spread
+                s_buy  = round_strike(price * 0.98, "itm")
+                s_sell = round_strike(price * 1.05, "otm")
+                picks.append(f"{ticker} Bull Call Spread 买${s_buy}/卖${s_sell} | 30-60天")
         else:
             if vix < 25:
-                s1 = round(price * 0.97, 2) if price > 100 else round(price * 0.97, 1)
-                pick = f"{ticker} Bull Call Spread ${s1}/${round(price*1.03,1)} 期限30-45天"
+                s_buy  = round_strike(price * 0.97, "itm")
+                s_sell = round_strike(price * 1.03, "otm")
+                picks.append(f"{ticker} Bull Call Spread 买${s_buy}/卖${s_sell} | 30-60天")
             else:
-                s1 = round(price * 0.95, 2) if price > 100 else round(price * 0.95, 1)
-                pick = f"{ticker} Cash-Secured Put 行权${s1} 期限30-45天"
-        picks.append(pick)
+                s1 = round_strike(price * 0.95, "itm")
+                s2 = round_strike(price * 0.97, "itm")
+                picks.append(f"{ticker} Cash-Secured Put ${s1}/30天 | ${s2}/60天")
+
+        if real_chain:
+            picks[-1] += " [LongPort真实期权链已启用]"
+
     return picks
 
 # ─── 飞书消息构建 ─────────────────────────────────────────────────────────────

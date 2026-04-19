@@ -61,4 +61,7 @@ jobs:
           TWELVE_DATA_API_KEY:  ${{ secrets.TWELVE_DATA_API_KEY }}
           FINNHUB_API_KEY:      ${{ secrets.FINNHUB_API_KEY }}
           PUSH_TYPE:            ${{ steps.push_type.outputs.type }}
+          LONGPORT_APP_KEY:     ${{ secrets.LONGPORT_APP_KEY }}
+          LONGPORT_APP_SECRET:  ${{ secrets.LONGPORT_APP_SECRET }}
+          LONGPORT_ACCESS_TOKEN: ${{ secrets.LONGPORT_ACCESS_TOKEN }}
         run: python -u scripts/push.py
