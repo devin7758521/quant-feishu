@@ -39,6 +39,14 @@
 | `FEISHU_WEBHOOK_URL` | 飞书机器人 Webhook URL |
 | `TWELVE_DATA_API_KEY` | Twelve Data API Key（twelvedata.com 免费注册）|
 | `FINNHUB_API_KEY` | Finnhub API Key（finnhub.io 免费注册，备用）|
+| `LONGPORT_APP_KEY` | 长桥 OpenAPI App Key（open.longportapp.com，需开户）|
+| `LONGPORT_APP_SECRET` | 长桥 OpenAPI App Secret |
+| `LONGPORT_ACCESS_TOKEN` | 长桥 OpenAPI Access Token |
+| `AI_PROVIDER` | AI 提供商：`deepseek`（默认）或 `gemini` |
+| `AI_API_KEY` | AI API Key（DeepSeek / Gemini）|
+| `AI_BASE_URL` | AI API 自定义端点（可选，DeepSeek 兼容格式）|
+| `AI_MODEL` | AI 模型名（可选，自动检测）|
+| `SCRAPLING_MODE` | Scrapling 抓取模式：`basic`（默认，HTTP）或 `stealth`（Playwright反爬）|
 
 ### 第四步：启用 Actions
 
