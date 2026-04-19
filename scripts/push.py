@@ -370,6 +370,19 @@ def get_position(score, vix):
 
 # ─── 新闻获取 ─────────────────────────────────────────────────────────────────
 
+def translate_to_cn(text):
+    """英文标题翻译为中文（MyMemory免费API，无需Key）"""
+    try:
+        url = f"https://api.mymemory.translated.net/get?q={requests.utils.quote(text)}&langpair=en|zh-CN"
+        r = requests.get(url, timeout=5)
+        data = r.json()
+        translated = data.get("responseData", {}).get("translatedText", "")
+        if translated and translated != text:
+            return translated
+    except Exception:
+        pass
+    return text  # 翻译失败返回原文
+
 def fetch_news(vix=None):
     """多源新闻：Finnhub市场 + Google News最新头条(Business/World/Politics/Tech)
     不需要关键词，直接抓各板块最新Top新闻
@@ -386,12 +399,13 @@ def fetch_news(vix=None):
                 headline = n.get("headline", "")
                 src = n.get("source", "")
                 if headline:
-                    all_news.append({"headline": headline, "source": src, "category": "market"})
+                    cn = translate_to_cn(headline)
+                    all_news.append({"headline": cn, "source": src, "category": "market"})
             print(f"Finnhub market news: {len(all_news)} items")
         except Exception as e:
             print(f"Finnhub news failed: {e}")
 
-    # 2. Google News RSS - 各板块最新头条（中文）
+    # 2. Google News RSS - 各板块最新头条（英文源，翻译为中文）
     try:
         sections = {
             "business":  "CAAqJggKIiBDQkFTRWdvSUwyMHZNRGx6TVdZU0FtVnVHZ0pWVXlnQVAB",
@@ -401,7 +415,7 @@ def fetch_news(vix=None):
         }
         seen = set()
         for section, topic_id in sections.items():
-            rss_url = f"https://news.google.com/rss/topics/{topic_id}?hl=zh-CN&gl=CN&ceid=CN:zh-Hans"
+            rss_url = f"https://news.google.com/rss/topics/{topic_id}?hl=en-US&gl=US&ceid=US:en"
             headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0"}
             try:
                 r = requests.get(rss_url, headers=headers, timeout=8)
@@ -411,10 +425,11 @@ def fetch_news(vix=None):
                 for item in root.findall(".//item")[:3]:
                     title = item.findtext("title", "").strip()
                     title_key = title[:60].lower()
-                    if title_key in seen or not title:
-                        continue
-                    seen.add(title_key)
-                    all_news.append({"headline": title, "source": "Google News", "category": section})
+                if title_key in seen or not title:
+                    continue
+                seen.add(title_key)
+                cn = translate_to_cn(title)
+                all_news.append({"headline": cn, "source": "Google News", "category": section})
             except Exception:
                 continue
             time.sleep(0.3)
