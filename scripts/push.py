@@ -210,13 +210,9 @@ def fetch_quotes_twelvedata():
                     time.sleep(8)
 
         if i + BATCH_SIZE < len(ticker_list):
-            time.sleep(8)
+            time.sleep(8)  # 免费版8次/分钟，每批1次请求
     return result
 
-        # 免费版8次/分钟，每批1次请求，间隔12秒
-        if i + BATCH_SIZE < len(ticker_list):
-            time.sleep(12)
-    return result
 
 FINNHUB_SYMBOL_MAP = {"BRK-B": "BRK.B"}
 
