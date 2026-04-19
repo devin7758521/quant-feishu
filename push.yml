@@ -1,0 +1,69 @@
+name: Quant Alpha 飞书推送
+
+on:
+  schedule:
+    # UTC时间，避开整点拥挤时段
+    # 美股交易日（周一至周五）推送
+    - cron: '47 13 * * 1-5'   # 北京 21:47 — 开盘前预热
+    - cron: '47 14 * * 1-5'   # 北京 22:47 — 开盘确认
+    - cron: '17 18 * * 1-5'   # 北京 02:17 — 半场复盘
+    - cron: '47 21 * * 1-5'   # 北京 05:47 — 收盘总结
+  workflow_dispatch:
+    # 支持手动触发，可选推送类型
+    inputs:
+      push_type:
+        description: '推送类型'
+        required: false
+        default: 'morning'
+        type: choice
+        options:
+          - morning
+          - open
+          - midday
+          - close
+
+jobs:
+  push:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install requests
+
+      - name: Determine push type
+        id: push_type
+        run: |
+          # 手动触发时用输入的类型
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "type=${{ inputs.push_type }}" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          # 定时触发时根据 UTC 小时判断
+          HOUR=$(date -u +%H)
+          MIN=$(date -u +%M)
+          if [ "$HOUR" = "13" ]; then
+            echo "type=morning" >> $GITHUB_OUTPUT
+          elif [ "$HOUR" = "14" ]; then
+            echo "type=open" >> $GITHUB_OUTPUT
+          elif [ "$HOUR" = "18" ]; then
+            echo "type=midday" >> $GITHUB_OUTPUT
+          else
+            echo "type=close" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Run push script
+        env:
+          FEISHU_WEBHOOK_URL:   ${{ secrets.FEISHU_WEBHOOK_URL }}
+          TWELVE_DATA_API_KEY:  ${{ secrets.TWELVE_DATA_API_KEY }}
+          FINNHUB_API_KEY:      ${{ secrets.FINNHUB_API_KEY }}
+          PUSH_TYPE:            ${{ steps.push_type.outputs.type }}
+        run: python scripts/push.py
