@@ -391,7 +391,7 @@ WEIGHT_LABELS = {
     "position":   "趋势位",
 }
 
-def build_feishu_card(vix_data, scored_stocks, push_type):
+def build_feishu_text(vix_data, scored_stocks, push_type):
     now_bjt = datetime.now(BJT).strftime("%Y-%m-%d %H:%M")
     vix     = vix_data["price"]
     vix_chg = vix_data["change"]
@@ -401,140 +401,72 @@ def build_feishu_card(vix_data, scored_stocks, push_type):
     top10   = scored_stocks[:10]
     movers  = [s for s in scored_stocks if abs(s["change_pct"]) > 3]
 
-    # ── Header ──────────────────────────────────────────────────────────────
-    header_color = (
-        "green"  if vix < 20 else
-        "yellow" if vix < 25 else
-        "orange" if vix < 35 else
-        "red"
-    )
+    lines = []
+    lines.append(PUSH_TITLES.get(push_type, "📊 量化选股播报"))
+    lines.append(PUSH_SUBTITLES.get(push_type, ""))
+    lines.append("")
 
-    elements = []
-
-    # ── VIX 模块 ────────────────────────────────────────────────────────────
+    # VIX
     vix_chg_str = f"+{vix_chg:.1f}%" if vix_chg >= 0 else f"{vix_chg:.1f}%"
-    elements.append({
-        "tag": "div",
-        "text": {
-            "tag": "lark_md",
-            "content": (
-                f"**{regime['emoji']} VIX 恐慌指数：{vix:.1f}** （{vix_chg_str}）\n"
-                f"市场情绪：**{regime['label']}** · 策略模式：**{regime['mode']}**"
-            )
-        }
-    })
-
-    # 因子权重
+    lines.append(f"{regime['emoji']} VIX 恐慌指数：{vix:.1f}（{vix_chg_str}）")
+    lines.append(f"市场情绪：{regime['label']} · 策略模式：{regime['mode']}")
     w_str = " · ".join([f"{WEIGHT_LABELS[k]} {round(v*100)}%" for k, v in w.items()])
-    elements.append({
-        "tag": "div",
-        "text": {"tag": "lark_md", "content": f"当前权重 · {w_str}"}
-    })
-    elements.append({"tag": "hr"})
+    lines.append(f"当前权重 · {w_str}")
+    lines.append("")
 
-    # ── 选股播报关键词（飞书 Webhook 关键词过滤必须匹配）─────────────────────
-    elements.append({
-        "tag": "div",
-        "text": {"tag": "lark_md", "content": "📌 **选股播报消息** · 量化评分引擎"}
-    })
-
-    # ── TOP10 排名 ───────────────────────────────────────────────────────────
-    elements.append({
-        "tag": "div",
-        "text": {"tag": "lark_md", "content": "**📊 综合评分 TOP10**"}
-    })
-
-    rows = []
+    # TOP10
+    lines.append("📊 综合评分 TOP10")
     for i, s in enumerate(top10):
         chg = s["change_pct"]
         chg_str = f"+{chg:.1f}%" if chg >= 0 else f"{chg:.1f}%"
         chg_icon = "📈" if chg >= 0 else "📉"
-        rows.append(
-            f"**{i+1}. {s['ticker']}** {s['signal']}  "
-            f"评分 `{s['score']}`  {chg_icon}{chg_str}  "
-            f"💡 {s['option_strategy']}  📦 {s['position']}"
+        lines.append(
+            f"  {i+1}. {s['ticker']} {s['signal']}  "
+            f"评分{s['score']}  {chg_icon}{chg_str}  "
+            f"💡{s['option_strategy']}  📦{s['position']}"
         )
+    lines.append("")
 
-    elements.append({
-        "tag": "div",
-        "text": {"tag": "lark_md", "content": "\n".join(rows)}
-    })
-    elements.append({"tag": "hr"})
-
-    # ── 异动股 ──────────────────────────────────────────────────────────────
+    # 异动股
     if movers:
-        elements.append({
-            "tag": "div",
-            "text": {"tag": "lark_md", "content": "**🚀 今日异动（涨跌>3%）**"}
-        })
-        mover_rows = []
+        lines.append("🚀 今日异动（涨跌>3%）")
         for s in movers[:8]:
             chg = s["change_pct"]
             icon = "🚀" if chg > 0 else "💥"
-            mover_rows.append(
-                f"{icon} **{s['ticker']}** {'+' if chg>0 else ''}{chg:.1f}%  "
+            lines.append(
+                f"  {icon} {s['ticker']} {'+' if chg>0 else ''}{chg:.1f}%  "
                 f"评分{s['score']}  {s['option_strategy']}"
             )
-        elements.append({
-            "tag": "div",
-            "text": {"tag": "lark_md", "content": "\n".join(mover_rows)}
-        })
-        elements.append({"tag": "hr"})
+        lines.append("")
 
-    # ── 期权条件提示 ─────────────────────────────────────────────────────────
+    # 期权提示
     if vix >= 35:
-        opt_tip = "⚠️ **VIX>35，建议暂停期权买方，以卖方策略或空仓为主**"
+        lines.append("⚠️ VIX>35，建议暂停期权买方，以卖方策略或空仓为主")
     elif vix >= 25:
-        opt_tip = "🎯 **VIX>25，IV偏高，卖方策略（CSP/Iron Condor）占优**"
+        lines.append("🎯 VIX>25，IV偏高，卖方策略（CSP/Iron Condor）占优")
     else:
-        opt_tip = "✅ **VIX<25，IV偏低，买方策略（Long Call/Spread）成本合理**"
-    elements.append({
-        "tag": "div",
-        "text": {"tag": "lark_md", "content": opt_tip}
-    })
-    elements.append({"tag": "hr"})
+        lines.append("✅ VIX<25，IV偏低，买方策略（Long Call/Spread）成本合理")
+    lines.append("")
 
-    # ── 强买信号全列 ─────────────────────────────────────────────────────────
+    # 强买信号
     strong_buys = [s for s in scored_stocks if s["score"] > 72]
     if strong_buys:
         sb_list = "、".join([s["ticker"] for s in strong_buys[:8]])
-        elements.append({
-            "tag": "div",
-            "text": {"tag": "lark_md", "content": f"🔥 **强买信号（评分>72）：{sb_list}**"}
-        })
+        lines.append(f"🔥 强买信号（评分>72）：{sb_list}")
+        lines.append("")
 
-    # ── 时间戳 ──────────────────────────────────────────────────────────────
-    elements.append({
-        "tag": "div",
-        "text": {"tag": "lark_md", "content": f"⏰ {now_bjt} 北京时间 · 数据仅供参考"}
-    })
-
-    card = {
-        "config": {"wide_screen_mode": True},
-        "header": {
-            "title": {
-                "tag": "plain_text",
-                "content": f"{PUSH_TITLES.get(push_type, '📊 Quant Alpha 推送')}"
-            },
-            "subtitle": {
-                "tag": "plain_text",
-                "content": PUSH_SUBTITLES.get(push_type, "")
-            },
-            "template": header_color,
-        },
-        "elements": elements,
-    }
-    return card
+    lines.append(f"⏰ {now_bjt} 北京时间 · 选股播报 · 数据仅供参考")
+    return "\n".join(lines)
 
 # ─── 推送飞书 ─────────────────────────────────────────────────────────────────
 
-def push_to_feishu(card):
+def push_to_feishu(text):
     if not FEISHU_WEBHOOK:
         print("❌ FEISHU_WEBHOOK_URL not set")
         return False
     payload = {
-        "msg_type": "interactive",
-        "card": card,
+        "msg_type": "text",
+        "content": {"text": text},
     }
     r = requests.post(FEISHU_WEBHOOK, json=payload, timeout=10)
     result = r.json()
@@ -595,10 +527,10 @@ def main():
     print(f"Scored {len(scored)} stocks, top: {scored[0]['ticker']} ({scored[0]['score']})")
 
     # 4. 构建消息
-    card = build_feishu_card(vix_data, scored, push_type)
+    text = build_feishu_text(vix_data, scored, push_type)
 
     # 5. 推送
-    success = push_to_feishu(card)
+    success = push_to_feishu(text)
     sys.exit(0 if success else 1)
 
 if __name__ == "__main__":
