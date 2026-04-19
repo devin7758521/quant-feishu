@@ -61,4 +61,4 @@ jobs:
           TWELVE_DATA_API_KEY:  ${{ secrets.TWELVE_DATA_API_KEY }}
           FINNHUB_API_KEY:      ${{ secrets.FINNHUB_API_KEY }}
           PUSH_TYPE:            ${{ steps.push_type.outputs.type }}
-        run: python scripts/push.py
+        run: python -u scripts/push.py

@@ -110,7 +110,7 @@ def fetch_vix():
                 price = float(data["close"])
                 prev = float(data.get("previous_close") or price)
                 chg = round((price - prev) / prev * 100, 2) if prev else 0
-                print(f"VIX from Twelve Data: {price}")
+                print(f"VIX from Twelve Data: {price}", flush=True)
                 return {"price": price, "change": chg}
             print(f"VIX Twelve Data error: {data.get('message', 'unknown')[:100]}")
         except Exception as e:
@@ -154,31 +154,33 @@ def fetch_vix():
     print("All VIX sources failed")
     return None
 
+def log(msg):
+    print(msg, flush=True)
+
 def fetch_quotes_twelvedata():
     """Twelve Data 分批行情（每批最多8只，遵守免费版8次/分钟限制）"""
     BATCH_SIZE = 8
     result = {}
     ticker_list = [s["ticker"].replace("BRK-B", "BRK/B") for s in UNIVERSE]
     ticker_to_stock = {s["ticker"].replace("BRK-B", "BRK/B"): s for s in UNIVERSE}
+    total_batches = (len(ticker_list) + BATCH_SIZE - 1) // BATCH_SIZE
 
     for i in range(0, len(ticker_list), BATCH_SIZE):
         batch = ticker_list[i:i + BATCH_SIZE]
         sym = ",".join(batch)
         batch_num = i // BATCH_SIZE + 1
-        total_batches = (len(ticker_list) + BATCH_SIZE - 1) // BATCH_SIZE
-        print(f"Twelve Data batch {batch_num}/{total_batches}: {sym[:60]}...")
+        log(f"[{batch_num}/{total_batches}] fetching: {sym}")
         url = f"https://api.twelvedata.com/quote?symbol={sym}&apikey={TWELVE_DATA_KEY}"
 
-        # 最多重试2次
-        for attempt in range(3):
+        # 最多重试1次
+        for attempt in range(2):
             try:
-                r = requests.get(url, timeout=30)
+                r = requests.get(url, timeout=15)
                 data = r.json()
-                # 整体错误（如限流、key无效）
-                if data.get("status") == "error" and "code" in data:
-                    print(f"  API error: {data.get('message', '')[:120]}")
-                    if attempt < 2:
-                        time.sleep(12)
+                if data.get("status") == "error":
+                    log(f"  API error({attempt}): {data.get('message', '')[:100]}")
+                    if attempt < 1:
+                        time.sleep(8)
                         continue
                     break
                 for td_key in batch:
@@ -199,14 +201,17 @@ def fetch_quotes_twelvedata():
                         }
                     except Exception:
                         continue
-                batch_tickers = [ticker_to_stock[t]["ticker"] for t in batch if t in ticker_to_stock]
-                got = sum(1 for t in batch_tickers if t in result)
-                print(f"  Got {got}/{len(batch_tickers)} from this batch")
+                got = sum(1 for t in [ticker_to_stock[t] for t in batch if t in ticker_to_stock] if t["ticker"] in result)
+                log(f"  OK: {got}/{len(batch)} stocks")
                 break
             except Exception as e:
-                print(f"  Batch {batch_num} attempt {attempt+1} failed: {e}")
-                if attempt < 2:
-                    time.sleep(12)
+                log(f"  Error({attempt}): {e}")
+                if attempt < 1:
+                    time.sleep(8)
+
+        if i + BATCH_SIZE < len(ticker_list):
+            time.sleep(8)
+    return result
 
         # 免费版8次/分钟，每批1次请求，间隔12秒
         if i + BATCH_SIZE < len(ticker_list):
