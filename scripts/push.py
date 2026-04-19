@@ -80,10 +80,10 @@ UNIVERSE = [
 # ─── 数据获取 ─────────────────────────────────────────────────────────────────
 
 def fetch_vix():
-    """多源获取 VIX：Twelve Data → Finnhub → Yahoo v8 chart"""
+    """多源获取 VIX：Twelve Data → Finnhub → FRED (免费兜底)"""
     if TWELVE_DATA_KEY:
         try:
-            url = f"https://api.twelvedata.com/quote?symbol=VIX&exchange=CBOE&apikey={TWELVE_DATA_KEY}"
+            url = f"https://api.twelvedata.com/quote?symbol=VIX:INDEXCBOE&apikey={TWELVE_DATA_KEY}"
             r = requests.get(url, timeout=10)
             data = r.json()
             if data.get("status") != "error" and data.get("close"):
@@ -92,6 +92,7 @@ def fetch_vix():
                 chg = round((price - prev) / prev * 100, 2) if prev else 0
                 print(f"VIX from Twelve Data: {price}")
                 return {"price": price, "change": chg}
+            print(f"VIX Twelve Data error: {data.get('message', 'unknown')[:100]}")
         except Exception as e:
             print(f"VIX Twelve Data failed: {e}")
 
@@ -105,24 +106,28 @@ def fetch_vix():
                 chg = round((data["c"] - pc) / pc * 100, 2) if pc else 0
                 print(f"VIX from Finnhub: {data['c']}")
                 return {"price": float(data["c"]), "change": chg}
+            print(f"VIX Finnhub: no data, response={json.dumps(data)[:100]}")
         except Exception as e:
             print(f"VIX Finnhub failed: {e}")
 
     try:
-        url = "https://query1.finance.yahoo.com/v8/finance/chart/%5EVIX?range=5d&interval=1d"
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-        }
-        r = requests.get(url, headers=headers, timeout=10)
-        data = r.json()
-        meta = data["chart"]["result"][0]["meta"]
-        price = float(meta["regularMarketPrice"])
-        prev = float(meta.get("chartPreviousClose") or meta.get("previousClose") or price)
-        chg = round((price - prev) / prev * 100, 2) if prev else 0
-        print(f"VIX from Yahoo v8: {price}")
-        return {"price": price, "change": chg}
+        r = requests.get("https://fred.stlouisfed.org/graph/fredgraph.csv?id=VIXCLS&cosd="
+                         + (datetime.now(timezone.utc) - timedelta(days=5)).strftime("%Y-%m-%d"),
+                         timeout=10)
+        if r.status_code == 200:
+            lines = r.text.strip().split("\n")
+            if len(lines) >= 3:
+                last = lines[-1].split(",")
+                prev = lines[-2].split(",")
+                if len(last) == 2 and last[1].strip() and len(prev) == 2 and prev[1].strip():
+                    price = float(last[1].strip())
+                    prev_price = float(prev[1].strip())
+                    chg = round((price - prev_price) / prev_price * 100, 2)
+                    print(f"VIX from FRED: {price} (date: {last[0].strip()})")
+                    return {"price": price, "change": chg}
+        print(f"VIX FRED: status={r.status_code}, data={r.text[:100]}")
     except Exception as e:
-        print(f"VIX Yahoo v8 failed: {e}")
+        print(f"VIX FRED failed: {e}")
 
     print("All VIX sources failed")
     return None
