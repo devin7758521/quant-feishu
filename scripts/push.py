@@ -80,16 +80,52 @@ UNIVERSE = [
 # ─── 数据获取 ─────────────────────────────────────────────────────────────────
 
 def fetch_vix():
-    """从 Yahoo Finance 拉 VIX"""
+    """多源获取 VIX：Twelve Data → Finnhub → Yahoo v8 chart"""
+    if TWELVE_DATA_KEY:
+        try:
+            url = f"https://api.twelvedata.com/quote?symbol=VIX&exchange=CBOE&apikey={TWELVE_DATA_KEY}"
+            r = requests.get(url, timeout=10)
+            data = r.json()
+            if data.get("status") != "error" and data.get("close"):
+                price = float(data["close"])
+                prev = float(data.get("previous_close") or price)
+                chg = round((price - prev) / prev * 100, 2) if prev else 0
+                print(f"VIX from Twelve Data: {price}")
+                return {"price": price, "change": chg}
+        except Exception as e:
+            print(f"VIX Twelve Data failed: {e}")
+
+    if FINNHUB_KEY:
+        try:
+            url = f"https://finnhub.io/api/v1/quote?symbol=%5EVIX&token={FINNHUB_KEY}"
+            r = requests.get(url, timeout=10)
+            data = r.json()
+            if data.get("c") and data["c"] > 0:
+                pc = data.get("pc", data["c"])
+                chg = round((data["c"] - pc) / pc * 100, 2) if pc else 0
+                print(f"VIX from Finnhub: {data['c']}")
+                return {"price": float(data["c"]), "change": chg}
+        except Exception as e:
+            print(f"VIX Finnhub failed: {e}")
+
     try:
-        url = "https://query1.finance.yahoo.com/v7/finance/quote?symbols=%5EVIX"
-        r = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
+        url = "https://query1.finance.yahoo.com/v8/finance/chart/%5EVIX?range=5d&interval=1d"
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        }
+        r = requests.get(url, headers=headers, timeout=10)
         data = r.json()
-        q = data["quoteResponse"]["result"][0]
-        return {"price": q["regularMarketPrice"], "change": q["regularMarketChangePercent"]}
+        meta = data["chart"]["result"][0]["meta"]
+        price = float(meta["regularMarketPrice"])
+        prev = float(meta.get("chartPreviousClose") or meta.get("previousClose") or price)
+        chg = round((price - prev) / prev * 100, 2) if prev else 0
+        print(f"VIX from Yahoo v8: {price}")
+        return {"price": price, "change": chg}
     except Exception as e:
-        print(f"VIX fetch failed: {e}")
-        return None
+        print(f"VIX Yahoo v8 failed: {e}")
+
+    print("All VIX sources failed")
+    return None
 
 def fetch_quotes_twelvedata():
     """Twelve Data 批量行情"""
