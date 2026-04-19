@@ -370,8 +370,10 @@ def get_position(score, vix):
 
 # ─── 新闻获取 ─────────────────────────────────────────────────────────────────
 
-def fetch_news():
-    """多源新闻：Finnhub市场新闻 + Google News国际/政治/贸易"""
+def fetch_news(vix=None):
+    """多源新闻：Finnhub市场新闻 + Google News国际/政治/贸易
+    VIX动态关键词：恐慌时关注地缘/关税/衰退，乐观时关注降息/科技/AI
+    """
     all_news = []
 
     # 1. Finnhub 市场新闻
@@ -389,9 +391,17 @@ def fetch_news():
         except Exception as e:
             print(f"Finnhub news failed: {e}")
 
-    # 2. Google News RSS - 国际/政治/贸易/关税
+    # 2. Google News RSS - VIX动态关键词
     try:
-        keywords = ["us+china+trade", "trump+tariff", "fed+interest+rate", "geopolitical"]
+        if vix and vix >= 30:
+            # 恐慌：关税战/衰退/地缘冲突/制裁
+            keywords = ["us+tariff+trade+war", "recession+risk+economy", "sanctions+geopolitical", "market+crash+panic"]
+        elif vix and vix >= 20:
+            # 正常波动：中美贸易/美联储/通胀
+            keywords = ["us+china+trade+deal", "fed+interest+rate", "inflation+cpi+economy", "trump+tariff"]
+        else:
+            # 乐观：降息/科技/AI/牛市
+            keywords = ["fed+rate+cut", "AI+tech+boom", "bull+market+rally", "us+china+trade"]
         seen = set()
         for kw in keywords:
             rss_url = f"https://news.google.com/rss/search?q={kw}&hl=en-US&gl=US&ceid=US:en"
@@ -403,13 +413,11 @@ def fetch_news():
             items = root.findall(".//item")
             for item in items:
                 title = item.findtext("title", "").strip()
-                # 去重
                 title_key = title[:60].lower()
                 if title_key in seen:
                     continue
                 seen.add(title_key)
-                # 过滤掉纯个股新闻
-                if any(t in title.upper() for t in ["STOCK", "SHARES", "EARNINGS"]) and not any(k in title.upper() for k in ["TARIFF", "TRADE", "FED", "CHINA", "POLICY"]):
+                if any(t in title.upper() for t in ["STOCK", "SHARES", "EARNINGS"]) and not any(k in title.upper() for k in ["TARIFF", "TRADE", "FED", "CHINA", "POLICY", "RATE", "RECESSION"]):
                     continue
                 all_news.append({"headline": title, "source": "Google News", "category": "international"})
             if len(all_news) >= 12:
@@ -419,7 +427,6 @@ def fetch_news():
     except Exception as e:
         print(f"Google News failed: {e}")
 
-    # 市场新闻3条 + 国际新闻3条
     market = [n for n in all_news if n["category"] == "market"][:3]
     intl = [n for n in all_news if n["category"] == "international"][:3]
     return market, intl
@@ -548,7 +555,7 @@ def build_feishu_text(vix_data, scored_stocks, push_type):
         lines.append("")
 
     # 新闻
-    market_news, intl_news = fetch_news()
+    market_news, intl_news = fetch_news(vix)
     if market_news:
         lines.append("📰 市场要闻")
         for n in market_news:
