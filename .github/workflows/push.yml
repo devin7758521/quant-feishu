@@ -2,10 +2,10 @@ name: Quant Alpha 飞书推送
 
 on:
   schedule:
-    - cron: '47 13 * * 1-5'
-    - cron: '47 14 * * 1-5'
-    - cron: '17 18 * * 1-5'
-    - cron: '47 21 * * 1-5'
+    - cron: '47 13 * * 1-5'   # 开盘预热 21:47 BJT
+    - cron: '47 14 * * 1-5'   # 开盘确认 22:47 BJT
+    - cron: '17 18 * * 1-5'   # 半场复盘 02:17 BJT
+    - cron: '47 21 * * 1-5'   # 收盘总结 05:47 BJT
   workflow_dispatch:
     inputs:
       push_type:
@@ -22,7 +22,7 @@ on:
 jobs:
   push:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
 
     steps:
       - name: Checkout
@@ -32,9 +32,10 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+          cache: 'pip'
 
       - name: Install dependencies
-        run: pip install requests
+        run: pip install -r requirements.txt
 
       - name: Determine push type
         id: push_type

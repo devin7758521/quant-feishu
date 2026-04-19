@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 # scripts/push.py
 # 拉取实时行情 + VIX → 计算量化评分 → 推送飞书
-# 数据源: Twelve Data (主) + Finnhub (备) + Yahoo Finance VIX
+# 数据源: Twelve Data (主) + Finnhub (补缺) + Yahoo/FRED VIX
 
 import os
 import sys
 import json
-import math
+import time
 import requests
 from datetime import datetime, timezone, timedelta
 
@@ -17,8 +17,26 @@ TWELVE_DATA_KEY = os.environ.get("TWELVE_DATA_API_KEY", "")
 FINNHUB_KEY     = os.environ.get("FINNHUB_API_KEY", "")
 PUSH_TYPE       = os.environ.get("PUSH_TYPE", "morning")  # morning/open/midday/close
 
-# 北京时间
 BJT = timezone(timedelta(hours=8))
+
+# ─── 美股休市日（NYSE 2025-2026 主要假日）────────────────────────────────────
+
+NYSE_HOLIDAYS = {
+    # 2025
+    "2025-01-01", "2025-01-20", "2025-02-17", "2025-04-18",
+    "2025-05-26", "2025-06-19", "2025-07-04", "2025-09-01",
+    "2025-11-27", "2025-12-25",
+    # 2026
+    "2026-01-01", "2026-01-19", "2026-02-16", "2026-04-03",
+    "2026-05-25", "2026-06-19", "2026-07-03", "2026-09-07",
+    "2026-11-26", "2026-12-25",
+}
+
+def is_market_holiday():
+    """检查今天（美东时间）是否为 NYSE 休市日"""
+    et = timezone(timedelta(hours=-4))  # EDT
+    today_et = datetime.now(et).strftime("%Y-%m-%d")
+    return today_et in NYSE_HOLIDAYS
 
 # ─── 股票池（50只）────────────────────────────────────────────────────────────
 
@@ -80,7 +98,9 @@ UNIVERSE = [
 # ─── 数据获取 ─────────────────────────────────────────────────────────────────
 
 def fetch_vix():
-    """多源获取 VIX：Twelve Data → Finnhub → FRED (免费兜底)"""
+    """多源获取 VIX：Twelve Data → Yahoo v8 → FRED (免费兜底)
+    注: Finnhub 不支持 VIX 指数，已移除
+    """
     if TWELVE_DATA_KEY:
         try:
             url = f"https://api.twelvedata.com/quote?symbol=VIX:INDEXCBOE&apikey={TWELVE_DATA_KEY}"
@@ -96,19 +116,21 @@ def fetch_vix():
         except Exception as e:
             print(f"VIX Twelve Data failed: {e}")
 
-    if FINNHUB_KEY:
-        try:
-            url = f"https://finnhub.io/api/v1/quote?symbol=%5EVIX&token={FINNHUB_KEY}"
-            r = requests.get(url, timeout=10)
-            data = r.json()
-            if data.get("c") and data["c"] > 0:
-                pc = data.get("pc", data["c"])
-                chg = round((data["c"] - pc) / pc * 100, 2) if pc else 0
-                print(f"VIX from Finnhub: {data['c']}")
-                return {"price": float(data["c"]), "change": chg}
-            print(f"VIX Finnhub: no data, response={json.dumps(data)[:100]}")
-        except Exception as e:
-            print(f"VIX Finnhub failed: {e}")
+    try:
+        url = "https://query1.finance.yahoo.com/v8/finance/chart/%5EVIX?range=5d&interval=1d"
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        }
+        r = requests.get(url, headers=headers, timeout=10)
+        data = r.json()
+        meta = data["chart"]["result"][0]["meta"]
+        price = float(meta["regularMarketPrice"])
+        prev = float(meta.get("chartPreviousClose") or meta.get("previousClose") or price)
+        chg = round((price - prev) / prev * 100, 2) if prev else 0
+        print(f"VIX from Yahoo: {price}")
+        return {"price": price, "change": chg}
+    except Exception as e:
+        print(f"VIX Yahoo failed: {e}")
 
     try:
         r = requests.get("https://fred.stlouisfed.org/graph/fredgraph.csv?id=VIXCLS&cosd="
@@ -125,7 +147,7 @@ def fetch_vix():
                     chg = round((price - prev_price) / prev_price * 100, 2)
                     print(f"VIX from FRED: {price} (date: {last[0].strip()})")
                     return {"price": price, "change": chg}
-        print(f"VIX FRED: status={r.status_code}, data={r.text[:100]}")
+        print(f"VIX FRED: status={r.status_code}")
     except Exception as e:
         print(f"VIX FRED failed: {e}")
 
@@ -146,41 +168,47 @@ def fetch_quotes_twelvedata():
             continue
         try:
             result[s["ticker"]] = {
-                "price":         float(q.get("close") or 0),
-                "change_pct":    float(q.get("percent_change") or 0),
-                "high52w":       float(q.get("fifty_two_week", {}).get("high") or 0),
-                "low52w":        float(q.get("fifty_two_week", {}).get("low") or 0),
-                "pe":            float(q.get("pe") or 0) or None,
-                "volume":        int(q.get("volume") or 0),
+                "price":      float(q.get("close") or 0),
+                "change_pct": float(q.get("percent_change") or 0),
+                "high52w":    float(q.get("fifty_two_week", {}).get("high") or 0),
+                "low52w":     float(q.get("fifty_two_week", {}).get("low") or 0),
+                "pe":         float(q.get("pe") or 0) or None,
+                "volume":     int(q.get("volume") or 0),
             }
         except Exception:
             continue
     return result
 
+FINNHUB_SYMBOL_MAP = {"BRK-B": "BRK.B"}
+
 def fetch_quotes_finnhub():
-    """Finnhub 逐个拉行情（备用）"""
+    """Finnhub 逐个行情（备用），带速率限制"""
     result = {}
     for s in UNIVERSE:
+        symbol = FINNHUB_SYMBOL_MAP.get(s["ticker"], s["ticker"])
         try:
-            url = f"https://finnhub.io/api/v1/quote?symbol={s['ticker']}&token={FINNHUB_KEY}"
+            url = f"https://finnhub.io/api/v1/quote?symbol={symbol}&token={FINNHUB_KEY}"
             r = requests.get(url, timeout=8)
             q = r.json()
             if q.get("c") and q["c"] > 0:
                 pc = q.get("pc", q["c"])
+                dp = q.get("dp")
+                change_pct = round(dp, 2) if dp is not None else (round((q["c"] - pc) / pc * 100, 2) if pc else 0)
                 result[s["ticker"]] = {
                     "price":      float(q["c"]),
-                    "change_pct": round((q["c"] - pc) / pc * 100, 2) if pc else 0,
-                    "high52w":    float(q.get("h", 0)),
-                    "low52w":     float(q.get("l", 0)),
+                    "change_pct": change_pct,
+                    "high52w":    0,   # Finnhub h/l 是当日数据，非52周
+                    "low52w":     0,
                     "pe":         None,
-                    "volume":     0,
+                    "volume":     int(q.get("v", 0) or 0),
                 }
         except Exception:
             continue
+        time.sleep(1.2)  # 避免触发 60次/分钟 限制
     return result
 
 def fetch_quotes():
-    """主入口：Twelve Data → Finnhub → 失败"""
+    """主入口：Twelve Data → Finnhub 补缺（不覆盖已有数据）"""
     quotes = {}
     if TWELVE_DATA_KEY:
         try:
@@ -188,10 +216,15 @@ def fetch_quotes():
             print(f"Twelve Data: {len(quotes)} stocks")
         except Exception as e:
             print(f"Twelve Data failed: {e}")
-    if len(quotes) < 10 and FINNHUB_KEY:
+    if len(quotes) < len(UNIVERSE) and FINNHUB_KEY:
         try:
-            quotes = fetch_quotes_finnhub()
-            print(f"Finnhub: {len(quotes)} stocks")
+            finnhub_quotes = fetch_quotes_finnhub()
+            before = len(quotes)
+            for ticker, q in finnhub_quotes.items():
+                if ticker not in quotes:
+                    quotes[ticker] = q
+            added = len(quotes) - before
+            print(f"Finnhub supplemented {added} stocks, total: {len(quotes)}")
         except Exception as e:
             print(f"Finnhub failed: {e}")
     return quotes
@@ -208,14 +241,19 @@ def get_vix_regime(vix):
     return              {"label": "极度恐慌", "emoji": "🚨", "mode": "崩溃预警"}
 
 def get_weights(vix):
-    if vix < 15:  return {"momentum": 0.35, "quality": 0.20, "valuation": 0.10, "low_vol": 0.10, "earnings": 0.25}
-    if vix < 20:  return {"momentum": 0.30, "quality": 0.25, "valuation": 0.15, "low_vol": 0.12, "earnings": 0.18}
-    if vix < 25:  return {"momentum": 0.22, "quality": 0.28, "valuation": 0.20, "low_vol": 0.15, "earnings": 0.15}
-    if vix < 30:  return {"momentum": 0.15, "quality": 0.30, "valuation": 0.25, "low_vol": 0.20, "earnings": 0.10}
-    if vix < 35:  return {"momentum": 0.10, "quality": 0.32, "valuation": 0.25, "low_vol": 0.25, "earnings": 0.08}
-    return              {"momentum": 0.05, "quality": 0.28, "valuation": 0.20, "low_vol": 0.40, "earnings": 0.07}
+    """因子权重随 VIX 动态调整
+    低 VIX: 偏重趋势位+动量（追涨）
+    高 VIX: 偏重估值+稳定（防守）
+    """
+    if vix < 15:  return {"momentum": 0.25, "quality": 0.15, "valuation": 0.10, "stability": 0.10, "position": 0.40}
+    if vix < 20:  return {"momentum": 0.25, "quality": 0.20, "valuation": 0.12, "stability": 0.13, "position": 0.30}
+    if vix < 25:  return {"momentum": 0.20, "quality": 0.22, "valuation": 0.18, "stability": 0.15, "position": 0.25}
+    if vix < 30:  return {"momentum": 0.12, "quality": 0.25, "valuation": 0.25, "stability": 0.20, "position": 0.18}
+    if vix < 35:  return {"momentum": 0.08, "quality": 0.25, "valuation": 0.30, "stability": 0.25, "position": 0.12}
+    return              {"momentum": 0.05, "quality": 0.22, "valuation": 0.35, "stability": 0.30, "position": 0.08}
 
 def compute_score(quote, vix):
+    """五因子评分：动量 / 质量 / 估值 / 稳定性 / 趋势位"""
     if not quote or not quote.get("price"):
         return None
     price    = quote["price"]
@@ -225,19 +263,32 @@ def compute_score(quote, vix):
     pe       = quote["pe"]
 
     rng = high52w - low52w
-    pos52w   = ((price - low52w) / rng * 100) if rng > 0 else 50
-    momentum = min(max((chg + 5) * 10 * 0.4 + pos52w * 0.6, 0), 100)
-    quality  = min(max((65 - pe) / 60 * 100, 5), 95) if pe else 50
-    valuation= min(max((55 - pe) / 50 * 100, 5), 95) if pe else 50
-    low_vol  = 100 - abs(pos52w - 50)
-    earnings = min(max(50 + chg * 5, 0), 100)
+    pos52w = ((price - low52w) / rng * 100) if rng > 0 else 50
+
+    # 1. 动量：短期涨跌幅驱动
+    momentum = min(max(50 + chg * 5, 0), 100)
+
+    # 2. 质量：PE 合理区间（12-22）得分最优，偏离越远越差
+    if pe and pe > 0:
+        quality = min(max(100 - abs(pe - 17) * 3.5, 10), 95)
+    else:
+        quality = 50
+
+    # 3. 估值：越接近52周低点越便宜（价值机会）
+    valuation = min(max(100 - pos52w * 0.9, 5), 95)
+
+    # 4. 稳定性：日波动越小越稳
+    stability = min(max(100 - abs(chg) * 8, 10), 95)
+
+    # 5. 趋势位：52周区间位置越高说明趋势越强（低VIX时追涨有效）
+    position = min(max(pos52w, 5), 95)
 
     w = get_weights(vix)
-    score = (momentum  * w["momentum"]  +
-             quality   * w["quality"]   +
-             valuation * w["valuation"] +
-             low_vol   * w["low_vol"]   +
-             earnings  * w["earnings"])
+    score = (momentum   * w["momentum"]   +
+             quality    * w["quality"]    +
+             valuation  * w["valuation"]  +
+             stability  * w["stability"]  +
+             position   * w["position"])
     return round(score)
 
 def get_signal(score):
@@ -294,6 +345,14 @@ PUSH_SUBTITLES = {
     "close":   "收盘 · 今日复盘 + 次日预判",
 }
 
+WEIGHT_LABELS = {
+    "momentum":   "动量",
+    "quality":    "质量",
+    "valuation":  "估值",
+    "stability":  "稳定",
+    "position":   "趋势位",
+}
+
 def build_feishu_card(vix_data, scored_stocks, push_type):
     now_bjt = datetime.now(BJT).strftime("%Y-%m-%d %H:%M")
     vix     = vix_data["price"]
@@ -328,11 +387,7 @@ def build_feishu_card(vix_data, scored_stocks, push_type):
     })
 
     # 因子权重
-    w_str = (f"动量 {round(w['momentum']*100)}% · "
-             f"质量 {round(w['quality']*100)}% · "
-             f"估值 {round(w['valuation']*100)}% · "
-             f"低波 {round(w['low_vol']*100)}% · "
-             f"盈利 {round(w['earnings']*100)}%")
+    w_str = " · ".join([f"{WEIGHT_LABELS[k]} {round(v*100)}%" for k, v in w.items()])
     elements.append({
         "tag": "div",
         "text": {"tag": "lark_md", "content": f"当前权重 · {w_str}"}
@@ -452,6 +507,11 @@ def main():
     push_type = PUSH_TYPE
     print(f"🚀 Starting push: {push_type}")
 
+    # 0. 休市日检查
+    if is_market_holiday():
+        print("📅 Today is a NYSE holiday, skipping push")
+        sys.exit(0)
+
     # 1. 拉 VIX
     vix_data = fetch_vix()
     if not vix_data:
@@ -484,6 +544,10 @@ def main():
             "change_pct":      q["change_pct"],
         })
     scored.sort(key=lambda x: x["score"], reverse=True)
+
+    if not scored:
+        print("❌ No stocks scored, aborting")
+        sys.exit(1)
     print(f"Scored {len(scored)} stocks, top: {scored[0]['ticker']} ({scored[0]['score']})")
 
     # 4. 构建消息
