@@ -8,6 +8,7 @@ import sys
 import json
 import time
 import requests
+import xml.etree.ElementTree as ET
 from datetime import datetime, timezone, timedelta
 
 # ─── 配置 ────────────────────────────────────────────────────────────────────
@@ -370,25 +371,58 @@ def get_position(score, vix):
 # ─── 新闻获取 ─────────────────────────────────────────────────────────────────
 
 def fetch_news():
-    """Finnhub 市场新闻（取前5条）"""
-    if not FINNHUB_KEY:
-        return []
+    """多源新闻：Finnhub市场新闻 + Google News国际/政治/贸易"""
+    all_news = []
+
+    # 1. Finnhub 市场新闻
+    if FINNHUB_KEY:
+        try:
+            url = f"https://finnhub.io/api/v1/news?category=general&token={FINNHUB_KEY}"
+            r = requests.get(url, timeout=8)
+            items = r.json()
+            for n in items[:5]:
+                headline = n.get("headline", "")
+                src = n.get("source", "")
+                if headline:
+                    all_news.append({"headline": headline, "source": src, "category": "market"})
+            print(f"Finnhub market news: {len(all_news)} items")
+        except Exception as e:
+            print(f"Finnhub news failed: {e}")
+
+    # 2. Google News RSS - 国际/政治/贸易/关税
     try:
-        url = f"https://finnhub.io/api/v1/news?category=general&token={FINNHUB_KEY}"
-        r = requests.get(url, timeout=8)
-        items = r.json()
-        news = []
-        for n in items[:5]:
-            headline = n.get("headline", "")
-            src = n.get("source", "")
-            url_link = n.get("url", "")
-            if headline:
-                news.append({"headline": headline, "source": src, "url": url_link})
-        print(f"Finnhub news: {len(news)} items")
-        return news
+        keywords = ["us+china+trade", "trump+tariff", "fed+interest+rate", "geopolitical"]
+        seen = set()
+        for kw in keywords:
+            rss_url = f"https://news.google.com/rss/search?q={kw}&hl=en-US&gl=US&ceid=US:en"
+            headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0"}
+            r = requests.get(rss_url, headers=headers, timeout=8)
+            if r.status_code != 200:
+                continue
+            root = ET.fromstring(r.text)
+            items = root.findall(".//item")
+            for item in items:
+                title = item.findtext("title", "").strip()
+                # 去重
+                title_key = title[:60].lower()
+                if title_key in seen:
+                    continue
+                seen.add(title_key)
+                # 过滤掉纯个股新闻
+                if any(t in title.upper() for t in ["STOCK", "SHARES", "EARNINGS"]) and not any(k in title.upper() for k in ["TARIFF", "TRADE", "FED", "CHINA", "POLICY"]):
+                    continue
+                all_news.append({"headline": title, "source": "Google News", "category": "international"})
+            if len(all_news) >= 12:
+                break
+            time.sleep(0.5)
+        print(f"Google News international: {len([n for n in all_news if n['category']=='international'])} items")
     except Exception as e:
-        print(f"News fetch failed: {e}")
-        return []
+        print(f"Google News failed: {e}")
+
+    # 市场新闻3条 + 国际新闻3条
+    market = [n for n in all_news if n["category"] == "market"][:3]
+    intl = [n for n in all_news if n["category"] == "international"][:3]
+    return market, intl
 
 # ─── 期权合约建议 ─────────────────────────────────────────────────────────────
 
@@ -514,11 +548,16 @@ def build_feishu_text(vix_data, scored_stocks, push_type):
         lines.append("")
 
     # 新闻
-    news = fetch_news()
-    if news:
+    market_news, intl_news = fetch_news()
+    if market_news:
         lines.append("📰 市场要闻")
-        for n in news:
+        for n in market_news:
             lines.append(f"  · [{n['source']}] {n['headline']}")
+        lines.append("")
+    if intl_news:
+        lines.append("🌍 国际/政经要闻")
+        for n in intl_news:
+            lines.append(f"  · {n['headline']}")
         lines.append("")
 
     # 期权合约建议
