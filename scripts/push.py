@@ -371,8 +371,8 @@ def get_position(score, vix):
 # ─── 新闻获取 ─────────────────────────────────────────────────────────────────
 
 def fetch_news(vix=None):
-    """多源新闻：Finnhub市场新闻 + Google News国际/政治/贸易
-    VIX动态关键词：恐慌时关注地缘/关税/衰退，乐观时关注降息/科技/AI
+    """多源新闻：Finnhub市场 + Google News最新头条(Business/World/Politics/Tech)
+    不需要关键词，直接抓各板块最新Top新闻
     """
     all_news = []
 
@@ -391,45 +391,43 @@ def fetch_news(vix=None):
         except Exception as e:
             print(f"Finnhub news failed: {e}")
 
-    # 2. Google News RSS - VIX动态关键词
+    # 2. Google News RSS - 各板块最新头条
     try:
-        if vix and vix >= 30:
-            # 恐慌：关税战/衰退/地缘冲突/制裁
-            keywords = ["us+tariff+trade+war", "recession+risk+economy", "sanctions+geopolitical", "market+crash+panic"]
-        elif vix and vix >= 20:
-            # 正常波动：中美贸易/美联储/通胀
-            keywords = ["us+china+trade+deal", "fed+interest+rate", "inflation+cpi+economy", "trump+tariff"]
-        else:
-            # 乐观：降息/科技/AI/牛市
-            keywords = ["fed+rate+cut", "AI+tech+boom", "bull+market+rally", "us+china+trade"]
+        sections = {
+            "business":  "CAAqJggKIiBDQkFTRWdvSUwyMHZNRGx6TVdZU0FtVnVHZ0pWVXlnQVAB",
+            "world":     "CAAqJggKIiBDQkFTRWdvSUwyMHZNRGx1YlY4U0FtVnVHZ0pWVXlnQVAB",
+            "politics":  "CAAqJggKIiBDQkFTRWdvSUwyMHZNRGR6TVdZU0FtVnVHZ0pWVXlnQVAB",
+            "technology": "CAAqJggKIiBDQkFTRWdvSUwyMHZNRGRqTVhZU0FtVnVHZ0pWVXlnQVAB",
+        }
         seen = set()
-        for kw in keywords:
-            rss_url = f"https://news.google.com/rss/search?q={kw}&hl=en-US&gl=US&ceid=US:en"
+        for section, topic_id in sections.items():
+            rss_url = f"https://news.google.com/rss/topics/{topic_id}?hl=en-US&gl=US&ceid=US:en"
             headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0"}
-            r = requests.get(rss_url, headers=headers, timeout=8)
-            if r.status_code != 200:
+            try:
+                r = requests.get(rss_url, headers=headers, timeout=8)
+                if r.status_code != 200:
+                    continue
+                root = ET.fromstring(r.text)
+                for item in root.findall(".//item")[:3]:
+                    title = item.findtext("title", "").strip()
+                    title_key = title[:60].lower()
+                    if title_key in seen or not title:
+                        continue
+                    seen.add(title_key)
+                    all_news.append({"headline": title, "source": "Google News", "category": section})
+            except Exception:
                 continue
-            root = ET.fromstring(r.text)
-            items = root.findall(".//item")
-            for item in items:
-                title = item.findtext("title", "").strip()
-                title_key = title[:60].lower()
-                if title_key in seen:
-                    continue
-                seen.add(title_key)
-                if any(t in title.upper() for t in ["STOCK", "SHARES", "EARNINGS"]) and not any(k in title.upper() for k in ["TARIFF", "TRADE", "FED", "CHINA", "POLICY", "RATE", "RECESSION"]):
-                    continue
-                all_news.append({"headline": title, "source": "Google News", "category": "international"})
-            if len(all_news) >= 12:
-                break
-            time.sleep(0.5)
-        print(f"Google News international: {len([n for n in all_news if n['category']=='international'])} items")
+            time.sleep(0.3)
+        print(f"Google News: {len([n for n in all_news if n['source']=='Google News'])} items from {list(sections.keys())}")
     except Exception as e:
         print(f"Google News failed: {e}")
 
+    # 按板块分组
     market = [n for n in all_news if n["category"] == "market"][:3]
-    intl = [n for n in all_news if n["category"] == "international"][:3]
-    return market, intl
+    business = [n for n in all_news if n["category"] == "business"][:3]
+    world = [n for n in all_news if n["category"] in ("world", "politics")][:3]
+    tech = [n for n in all_news if n["category"] == "technology"][:2]
+    return market, business, world, tech
 
 # ─── 期权合约建议 ─────────────────────────────────────────────────────────────
 
@@ -555,15 +553,25 @@ def build_feishu_text(vix_data, scored_stocks, push_type):
         lines.append("")
 
     # 新闻
-    market_news, intl_news = fetch_news(vix)
+    market_news, business_news, world_news, tech_news = fetch_news(vix)
     if market_news:
         lines.append("📰 市场要闻")
         for n in market_news:
             lines.append(f"  · [{n['source']}] {n['headline']}")
         lines.append("")
-    if intl_news:
-        lines.append("🌍 国际/政经要闻")
-        for n in intl_news:
+    if business_news:
+        lines.append("💼 商业财经")
+        for n in business_news:
+            lines.append(f"  · {n['headline']}")
+        lines.append("")
+    if world_news:
+        lines.append("🌍 国际/政经")
+        for n in world_news:
+            lines.append(f"  · {n['headline']}")
+        lines.append("")
+    if tech_news:
+        lines.append("💻 科技动态")
+        for n in tech_news:
             lines.append(f"  · {n['headline']}")
         lines.append("")
 
