@@ -391,7 +391,7 @@ def fetch_news(vix=None):
         except Exception as e:
             print(f"Finnhub news failed: {e}")
 
-    # 2. Google News RSS - 各板块最新头条
+    # 2. Google News RSS - 各板块最新头条（中文）
     try:
         sections = {
             "business":  "CAAqJggKIiBDQkFTRWdvSUwyMHZNRGx6TVdZU0FtVnVHZ0pWVXlnQVAB",
@@ -401,7 +401,7 @@ def fetch_news(vix=None):
         }
         seen = set()
         for section, topic_id in sections.items():
-            rss_url = f"https://news.google.com/rss/topics/{topic_id}?hl=en-US&gl=US&ceid=US:en"
+            rss_url = f"https://news.google.com/rss/topics/{topic_id}?hl=zh-CN&gl=CN&ceid=CN:zh-Hans"
             headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0"}
             try:
                 r = requests.get(rss_url, headers=headers, timeout=8)
