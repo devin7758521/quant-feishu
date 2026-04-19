@@ -367,6 +367,64 @@ def get_position(score, vix):
         return "规避/空仓"
     return "空仓/对冲"
 
+# ─── 新闻获取 ─────────────────────────────────────────────────────────────────
+
+def fetch_news():
+    """Finnhub 市场新闻（取前5条）"""
+    if not FINNHUB_KEY:
+        return []
+    try:
+        url = f"https://finnhub.io/api/v1/news?category=general&token={FINNHUB_KEY}"
+        r = requests.get(url, timeout=8)
+        items = r.json()
+        news = []
+        for n in items[:5]:
+            headline = n.get("headline", "")
+            src = n.get("source", "")
+            url_link = n.get("url", "")
+            if headline:
+                news.append({"headline": headline, "source": src, "url": url_link})
+        print(f"Finnhub news: {len(news)} items")
+        return news
+    except Exception as e:
+        print(f"News fetch failed: {e}")
+        return []
+
+# ─── 期权合约建议 ─────────────────────────────────────────────────────────────
+
+def build_option_picks(scored_stocks, vix):
+    """根据评分+VIX给出具体期权合约建议（前3只强买/买入股）"""
+    buys = [s for s in scored_stocks if s["score"] > 58][:3]
+    if not buys:
+        return []
+    picks = []
+    for s in buys:
+        price = s["price"]
+        ticker = s["ticker"]
+        score = s["score"]
+        direction = "bull" if score > 65 else "neutral"
+
+        # 根据价格估算期权建议
+        if direction == "bull":
+            if vix < 25:
+                # 低IV：买入Call，选略OTM降低成本
+                strike = round(price * 1.02, 2) if price > 100 else round(price * 1.05, 1)
+                pick = f"{ticker} 买入Call 行权${strike} 期限30-45天"
+            else:
+                # 高IV：Bull Call Spread降低成本
+                s1 = round(price * 0.98, 2) if price > 100 else round(price * 0.98, 1)
+                s2 = round(price * 1.05, 2) if price > 100 else round(price * 1.05, 1)
+                pick = f"{ticker} Bull Call Spread ${s1}/${s2} 期限30-45天"
+        else:
+            if vix < 25:
+                s1 = round(price * 0.97, 2) if price > 100 else round(price * 0.97, 1)
+                pick = f"{ticker} Bull Call Spread ${s1}/${round(price*1.03,1)} 期限30-45天"
+            else:
+                s1 = round(price * 0.95, 2) if price > 100 else round(price * 0.95, 1)
+                pick = f"{ticker} Cash-Secured Put 行权${s1} 期限30-45天"
+        picks.append(pick)
+    return picks
+
 # ─── 飞书消息构建 ─────────────────────────────────────────────────────────────
 
 PUSH_TITLES = {
@@ -453,6 +511,22 @@ def build_feishu_text(vix_data, scored_stocks, push_type):
     if strong_buys:
         sb_list = "、".join([s["ticker"] for s in strong_buys[:8]])
         lines.append(f"🔥 强买信号（评分>72）：{sb_list}")
+        lines.append("")
+
+    # 新闻
+    news = fetch_news()
+    if news:
+        lines.append("📰 市场要闻")
+        for n in news:
+            lines.append(f"  · [{n['source']}] {n['headline']}")
+        lines.append("")
+
+    # 期权合约建议
+    option_picks = build_option_picks(scored_stocks, vix)
+    if option_picks:
+        lines.append("🎯 期权合约建议")
+        for p in option_picks:
+            lines.append(f"  ▸ {p}")
         lines.append("")
 
     lines.append(f"⏰ {now_bjt} 北京时间 · 选股播报 · 数据仅供参考")
