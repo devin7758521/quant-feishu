@@ -164,38 +164,53 @@ def fetch_quotes_twelvedata():
     for i in range(0, len(ticker_list), BATCH_SIZE):
         batch = ticker_list[i:i + BATCH_SIZE]
         sym = ",".join(batch)
+        batch_num = i // BATCH_SIZE + 1
+        total_batches = (len(ticker_list) + BATCH_SIZE - 1) // BATCH_SIZE
+        print(f"Twelve Data batch {batch_num}/{total_batches}: {sym[:60]}...")
         url = f"https://api.twelvedata.com/quote?symbol={sym}&apikey={TWELVE_DATA_KEY}"
-        try:
-            r = requests.get(url, timeout=30)
-            data = r.json()
-            # 整体错误（如限流、key无效）
-            if data.get("status") == "error" and "code" in data:
-                print(f"Twelve Data batch error: {data.get('message', '')[:120]}")
-                time.sleep(8)
-                continue
-            for td_key in batch:
-                stock = ticker_to_stock.get(td_key)
-                if not stock:
-                    continue
-                q = data.get(td_key) or data.get(td_key.replace("/", ":"))
-                if not q or q.get("status") == "error":
-                    continue
-                try:
-                    result[stock["ticker"]] = {
-                        "price":      float(q.get("close") or 0),
-                        "change_pct": float(q.get("percent_change") or 0),
-                        "high52w":    float(q.get("fifty_two_week", {}).get("high") or 0),
-                        "low52w":     float(q.get("fifty_two_week", {}).get("low") or 0),
-                        "pe":         float(q.get("pe") or 0) or None,
-                        "volume":     int(q.get("volume") or 0),
-                    }
-                except Exception:
-                    continue
-        except Exception as e:
-            print(f"Twelve Data batch {i//BATCH_SIZE+1} failed: {e}")
-        # 免费版8次/分钟，每批1次请求，间隔8秒
+
+        # 最多重试2次
+        for attempt in range(3):
+            try:
+                r = requests.get(url, timeout=30)
+                data = r.json()
+                # 整体错误（如限流、key无效）
+                if data.get("status") == "error" and "code" in data:
+                    print(f"  API error: {data.get('message', '')[:120]}")
+                    if attempt < 2:
+                        time.sleep(12)
+                        continue
+                    break
+                for td_key in batch:
+                    stock = ticker_to_stock.get(td_key)
+                    if not stock:
+                        continue
+                    q = data.get(td_key) or data.get(td_key.replace("/", ":"))
+                    if not q or q.get("status") == "error":
+                        continue
+                    try:
+                        result[stock["ticker"]] = {
+                            "price":      float(q.get("close") or 0),
+                            "change_pct": float(q.get("percent_change") or 0),
+                            "high52w":    float(q.get("fifty_two_week", {}).get("high") or 0),
+                            "low52w":     float(q.get("fifty_two_week", {}).get("low") or 0),
+                            "pe":         float(q.get("pe") or 0) or None,
+                            "volume":     int(q.get("volume") or 0),
+                        }
+                    except Exception:
+                        continue
+                batch_tickers = [ticker_to_stock[t]["ticker"] for t in batch if t in ticker_to_stock]
+                got = sum(1 for t in batch_tickers if t in result)
+                print(f"  Got {got}/{len(batch_tickers)} from this batch")
+                break
+            except Exception as e:
+                print(f"  Batch {batch_num} attempt {attempt+1} failed: {e}")
+                if attempt < 2:
+                    time.sleep(12)
+
+        # 免费版8次/分钟，每批1次请求，间隔12秒
         if i + BATCH_SIZE < len(ticker_list):
-            time.sleep(8)
+            time.sleep(12)
     return result
 
 FINNHUB_SYMBOL_MAP = {"BRK-B": "BRK.B"}
@@ -512,7 +527,7 @@ def push_to_feishu(card):
         return False
     payload = {
         "msg_type": "interactive",
-        "card": json.dumps(card),
+        "card": card,
     }
     r = requests.post(FEISHU_WEBHOOK, json=payload, timeout=10)
     result = r.json()
