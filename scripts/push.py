@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 # scripts/push.py
-# 拉取实时行情 + VIX → 计算量化评分 → 推送飞书
-# 数据源: Twelve Data (主) + Finnhub (补缺) + Yahoo/FRED VIX
+# 拉取实时行情 + VIX → 计算量化评分 → Scrapling深度新闻 → 长桥期权分析 → AI推理 → 推送飞书
+# 数据源: Twelve Data (主) + Finnhub (补缺) + Yahoo/FRED VIX + Scrapling + LongPort
 
 import os
 import sys
 import json
 import time
+import math
 import requests
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone, timedelta
@@ -21,6 +22,7 @@ AI_PROVIDER     = os.environ.get("AI_PROVIDER", "deepseek")  # deepseek / gemini
 AI_API_KEY      = os.environ.get("AI_API_KEY", "")
 AI_BASE_URL     = os.environ.get("AI_BASE_URL", "")          # override for custom endpoint
 AI_MODEL        = os.environ.get("AI_MODEL", "")             # auto-detect if empty
+SCRAPLING_MODE  = os.environ.get("SCRAPLING_MODE", "basic")  # basic / stealth
 
 BJT = timezone(timedelta(hours=8))
 
@@ -448,9 +450,80 @@ def fetch_news(vix=None):
     tech = [n for n in all_news if n["category"] == "technology"][:2]
     return market, business, world, tech
 
-def fetch_stock_news(tickers, days=3):
-    """为指定个股拉取近期新闻（Finnhub company-news），每只最多3条"""
-    results = {}
+# ─── Scrapling 深度新闻抓取 ──────────────────────────────────────────────────
+
+SCRAPLING_NEWS_SOURCES = [
+    # (name, url_template, title_xpath, snippet_xpath)
+    ("Yahoo Finance", "https://finance.yahoo.com/quote/{ticker}/news/", "//h3 | //a/h3", ""),
+    ("MarketWatch", "https://www.marketwatch.com/investing/stock/{ticker}?mod=quote_search", "//h3/article-heading", ""),
+    ("SeekingAlpha", "https://seekingalpha.com/symbol/{ticker}/news", "//a[contains(@class,'title')]", ""),
+    ("Google News", "https://news.google.com/search?q={ticker}+stock&hl=en-US", "//a/h4 | //h3", ""),
+    ("Reuters", "https://www.reuters.com/search/news?query={ticker}", "//h3/search-result-title", ""),
+    ("Benzinga", "https://www.benzinga.com/quote/{ticker}", "//h2 | //h3[contains(@class,'title')]", ""),
+    ("Investing.com", "https://www.investing.com/equities/{ticker}-news", "//article//a[@title]", ""),
+    ("TipRanks", "https://www.tipranks.com/stocks/{ticker}/news", "//h3 | //a[contains(@class,'title')]", ""),
+    ("Barrons", "https://www.barrons.com/market-data/stocks/{ticker}", "//h3", ""),
+    ("CNBC", "https://www.cnbc.com/quotes/{ticker}?tab=news", "//a[contains(@class,'title')]", ""),
+]
+
+def scrapling_news(tickers, min_total=20):
+    """Scrapling 深度抓取 TOP10 个股全网新闻、公告、机构评论
+    去重过滤无效内容，每个 ticker 目标 ≥2 条，总计 ≥20 条
+    fallback: Finnhub company-news
+    """
+    all_news = []
+    seen_titles = set()
+
+    try:
+        from scrapling import Fetcher
+        fetcher = Fetcher(auto_match=False, stealthy=SCRAPLING_MODE == "stealth")
+        print(f"Scrapling mode: {SCRAPLING_MODE}")
+
+        for ticker in tickers:
+            ticker_news = []
+            ticker_lower = ticker.lower().replace("-", ".")
+
+            for src_name, url_tpl, title_xpath, snippet_xpath in SCRAPLING_NEWS_SOURCES:
+                if len(ticker_news) >= 4 or len(all_news) >= min_total + 10:
+                    break
+                try:
+                    url = url_tpl.format(ticker=ticker_lower, TICKER=ticker)
+                    page = fetcher.get(url, timeout=12)
+                    titles = page.css(title_xpath.split(" | ")[0] if " | " in title_xpath else title_xpath)
+
+                    for el in titles[:3]:
+                        text = el.text.strip() if hasattr(el, 'text') else (el.get_text(strip=True) if hasattr(el, 'get_text') else "")
+                        if not text or len(text) < 10:
+                            continue
+                        key = text[:50].lower()
+                        if key in seen_titles:
+                            continue
+                        seen_titles.add(key)
+                        cn = translate_to_cn(text)
+                        ticker_news.append({"headline": cn, "source": src_name, "ticker": ticker})
+                    time.sleep(0.3)
+                except Exception as e:
+                    log(f"  Scrapling {src_name} for {ticker}: {e}")
+                    continue
+
+            all_news.extend(ticker_news)
+            print(f"  Scrapling {ticker}: {len(ticker_news)} articles")
+
+        if len(all_news) >= min_total:
+            print(f"Scrapling total: {len(all_news)} articles (target met)")
+            return all_news
+
+    except ImportError:
+        print("scrapling not installed, falling back to Finnhub")
+    except Exception as e:
+        print(f"Scrapling failed: {e}, falling back to Finnhub")
+
+    # Fallback: Finnhub company-news
+    return _finhub_stock_news(tickers)
+
+def _finhub_stock_news(tickers, days=3):
+    """Finnhub 兜底个股新闻"""
+    results = []
     if not FINNHUB_KEY:
         return results
     from_date = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%d")
@@ -461,23 +534,20 @@ def fetch_stock_news(tickers, days=3):
                    f"&from={from_date}&to={to_date}&token={FINNHUB_KEY}")
             r = requests.get(url, timeout=8)
             items = r.json()
-            news_items = []
-            for n in items[:3]:
+            for n in items[:5]:
                 headline = n.get("headline", "")
                 if headline:
                     cn = translate_to_cn(headline)
-                    news_items.append({"headline": cn, "source": n.get("source", ""), "ticker": ticker})
-            if news_items:
-                results[ticker] = news_items
+                    results.append({"headline": cn, "source": n.get("source", ""), "ticker": ticker})
         except Exception:
             continue
-        time.sleep(1.2)  # Finnhub 60次/分钟限制
-    print(f"Stock news: {len(results)} tickers with news")
+        time.sleep(1.2)
+    print(f"Finnhub stock news: {len(results)} articles")
     return results
 
-# ─── 期权合约建议 ─────────────────────────────────────────────────────────────
+# ─── 期权深度分析（LongPort SDK）─────────────────────────────────────────────
 
-# 长桥 LongPort OpenAPI（预留接口，配置后可拉取真实期权链）
+# 长桥 LongPort OpenAPI
 # pip install longbridge
 # 文档: https://open.longportapp.com/en-US/docs/quote/pull/optionchain
 # 需配置环境变量: LONGPORT_APP_KEY, LONGPORT_APP_SECRET, LONGPORT_ACCESS_TOKEN
@@ -489,48 +559,248 @@ def round_strike(price, direction="otm"):
     """将行权价规整为合法档位：
     < $25: $0.5倍数 | < $200: $2.5倍数 | < $1000: $5倍数 | >= $1000: $10倍数
     """
-    if price < 25:
-        step = 0.5
-    elif price < 200:
-        step = 2.5
-    elif price < 1000:
-        step = 5
-    else:
-        step = 10
-    import math
-    if direction == "otm":
-        return math.ceil(price / step) * step
-    elif direction == "itm":
-        return math.floor(price / step) * step
-    else:
-        return round(price / step) * step
+    if price < 25:     step = 0.5
+    elif price < 200:  step = 2.5
+    elif price < 1000: step = 5
+    else:              step = 10
+    if direction == "otm":   return math.ceil(price / step) * step
+    elif direction == "itm": return math.floor(price / step) * step
+    else:                    return round(price / step) * step
 
-def fetch_longport_option_chain(ticker):
-    """长桥 LongPort API 拉取真实期权链（预留接口）
-    配置 LONGPORT_APP_KEY/SECRET/ACCESS_TOKEN 后自动启用
-    返回: list of {strike, expiry, type, bid, ask, iv, delta} 或 None
-    """
+def _longport_ctx():
+    """创建 LongPort 上下文（复用）"""
     if not all([LONGPORT_APP_KEY, LONGPORT_APP_SECRET, LONGPORT_ACCESS_TOKEN]):
         return None
     try:
-        from longbridge.rest import TradeContext, Config
+        from longbridge.rest import QuoteContext, Config
         config = Config(LONGPORT_APP_KEY, LONGPORT_APP_SECRET, LONGPORT_ACCESS_TOKEN)
-        ctx = TradeContext(config)
-        # 获取期权链
-        option_chain = ctx.option_chain_expiry_date_list(symbol=f"{ticker}.US")
-        print(f"LongPort option chain for {ticker}: {len(option_chain)} expiries")
-        return option_chain
+        ctx = QuoteContext(config)
+        return ctx
     except ImportError:
         print("longbridge SDK not installed, skip real option data")
         return None
     except Exception as e:
-        print(f"LongPort API failed: {e}")
+        print(f"LongPort init failed: {e}")
         return None
+
+def fetch_option_chain_deep(ticker, ctx=None):
+    """长桥 API 拉取完整期权链 + 实时报价 + 希腊值
+    返回: list of {strike, expiry, type, bid, ask, iv, delta, gamma, theta, vega, volume, oi}
+    """
+    if ctx is None:
+        ctx = _longport_ctx()
+    if ctx is None:
+        return []
+
+    try:
+        symbol = f"{ticker}.US"
+        # 获取到期日列表
+        expiry_dates = ctx.option_chain_expiry_date_list(symbol=symbol)
+        if not expiry_dates:
+            return []
+
+        all_contracts = []
+        # 取最近3个到期日
+        for exp in expiry_dates[:3]:
+            exp_str = exp.strftime("%Y-%m-%d") if hasattr(exp, 'strftime') else str(exp)
+            # 获取行权价列表
+            strike_prices = ctx.option_chain_strike_list(symbol=symbol, expiry=exp)
+            for sp in strike_prices[:20]:  # 限制每档20个行权价
+                strike = float(sp)
+                for opt_type in ["call", "put"]:
+                    try:
+                        # 构造期权符号 (长桥格式: symbol_EP_日期_行权价_类型)
+                        # 获取期权报价
+                        option_symbol = f"{symbol}_{exp_str}_{strike}_{opt_type[0].upper()}"
+                        quotes = ctx.quotes([option_symbol])
+                        if quotes:
+                            q = quotes[0]
+                            all_contracts.append({
+                                "strike": strike,
+                                "expiry": exp_str,
+                                "type": opt_type,
+                                "bid": float(q.bid_price or 0),
+                                "ask": float(q.ask_price or 0),
+                                "iv": float(q.implied_volatility or 0),
+                                "delta": float(q.delta or 0),
+                                "gamma": float(q.gamma or 0),
+                                "theta": float(q.theta or 0),
+                                "vega": float(q.vega or 0),
+                                "volume": int(q.volume or 0),
+                                "oi": int(q.open_interest or 0),
+                            })
+                    except Exception:
+                        continue
+            time.sleep(0.2)
+
+        print(f"LongPort option chain for {ticker}: {len(all_contracts)} contracts from {len(expiry_dates[:3])} expiries")
+        return all_contracts
+
+    except Exception as e:
+        print(f"LongPort option chain failed for {ticker}: {e}")
+        return []
+
+def fetch_twelvedata_options(ticker):
+    """Twelve Data 兜底期权数据（免费版有限）"""
+    if not TWELVE_DATA_KEY:
+        return []
+    try:
+        url = f"https://api.twelvedata.com/options/chain?symbol={ticker}&apikey={TWELVE_DATA_KEY}"
+        r = requests.get(url, timeout=15)
+        data = r.json()
+        contracts = []
+        for item in data.get("data", [])[:30]:
+            try:
+                contracts.append({
+                    "strike": float(item.get("strike", 0)),
+                    "expiry": item.get("expiration_date", ""),
+                    "type": item.get("contract_type", "call").lower(),
+                    "bid": float(item.get("bid", 0)),
+                    "ask": float(item.get("ask", 0)),
+                    "iv": float(item.get("implied_volatility", 0)),
+                    "delta": float(item.get("delta", 0)),
+                    "gamma": float(item.get("gamma", 0)),
+                    "theta": float(item.get("theta", 0)),
+                    "vega": float(item.get("vega", 0)),
+                    "volume": int(item.get("volume", 0)),
+                    "oi": int(item.get("open_interest", 0)),
+                })
+            except Exception:
+                continue
+        print(f"Twelve Data options for {ticker}: {len(contracts)} contracts")
+        return contracts
+    except Exception as e:
+        print(f"Twelve Data options failed for {ticker}: {e}")
+        return []
+
+def option_analysis(ticker, price, score, vix):
+    """深度期权分析：拉取真实期权链 → 筛选流动性 → 推理策略 → 给出合约推荐
+    返回: dict with strategy, direction, contracts, breakeven, max_loss, take_profit, risk_reward
+    """
+    # 1. 拉取期权链数据
+    contracts = fetch_option_chain_deep(ticker)
+    if not contracts:
+        contracts = fetch_twelvedata_options(ticker)
+
+    # 2. 推理方向
+    direction = "bull" if score > 65 else "bear" if score < 42 else "neutral"
+
+    # 3. 筛选高流动性合约 (volume + oi 排序)
+    if contracts:
+        liquid = sorted(contracts, key=lambda c: c.get("volume", 0) + c.get("oi", 0) * 0.5, reverse=True)
+        liquid = [c for c in liquid if c.get("bid", 0) > 0 and c.get("ask", 0) > 0][:10]
+    else:
+        liquid = []
+
+    # 4. 根据方向和流动性推荐策略 + 最优合约
+    result = {"ticker": ticker, "direction": direction, "price": price, "real_data": bool(liquid)}
+
+    if direction == "bull":
+        if vix < 25:
+            result["strategy"] = "买入Call / Bull Call Spread"
+            # 找 ATM 或略 OTM call
+            call_candidates = [c for c in liquid if c["type"] == "call" and c["strike"] >= price * 0.98]
+            best = call_candidates[0] if call_candidates else None
+            if best:
+                premium = (best["bid"] + best["ask"]) / 2
+                result["contracts"] = [f"买 Call ${best['strike']} exp {best['expiry']} @${premium:.2f} IV={best['iv']:.0f}% Δ={best['delta']:.2f}"]
+                result["breakeven"] = round(best["strike"] + premium, 2)
+                result["max_loss"] = round(premium * 100, 0)
+                result["take_profit"] = f"≥${round(best['strike'] + premium * 2, 2)}"
+                result["risk_reward"] = "1:2+"
+            else:
+                strike = round_strike(price * 1.02, "otm")
+                result["contracts"] = [f"买 Call ${strike}/30-45天 (估算)"]
+                result["breakeven"] = round(strike * 1.03, 2)
+                result["max_loss"] = "权利金"
+                result["take_profit"] = f"≥${round(strike * 1.06, 2)}"
+                result["risk_reward"] = "1:2"
+        else:
+            result["strategy"] = "Bull Call Spread / Cash-Secured Put"
+            call_liquid = [c for c in liquid if c["type"] == "call"]
+            if len(call_liquid) >= 2:
+                buy_c = call_liquid[0]
+                sell_c = [c for c in call_liquid if c["strike"] > buy_c["strike"]][:1]
+                if sell_c:
+                    net_debit = ((buy_c["bid"] + buy_c["ask"]) / 2) - ((sell_c[0]["bid"] + sell_c[0]["ask"]) / 2)
+                    result["contracts"] = [f"买${buy_c['strike']}C / 卖${sell_c[0]['strike']}C exp {buy_c['expiry']} 净付${net_debit:.2f}"]
+                    result["breakeven"] = round(buy_c["strike"] + net_debit, 2)
+                    result["max_loss"] = round(net_debit * 100, 0)
+                    result["take_profit"] = f"≥${round(sell_c[0]['strike'], 2)}"
+                    result["risk_reward"] = "1:1.5"
+            else:
+                s_buy = round_strike(price * 0.98, "itm")
+                s_sell = round_strike(price * 1.05, "otm")
+                result["strategy"] = "Bull Call Spread"
+                result["contracts"] = [f"买${s_buy}C / 卖${s_sell}C 30-60天 (估算)"]
+                result["breakeven"] = s_buy
+                result["max_loss"] = "净权利金"
+                result["take_profit"] = f"≥${s_sell}"
+                result["risk_reward"] = "1:1.5"
+
+    elif direction == "bear":
+        if vix < 25:
+            result["strategy"] = "买入Put"
+            put_candidates = [c for c in liquid if c["type"] == "put" and c["strike"] <= price * 1.02]
+            best = put_candidates[0] if put_candidates else None
+            if best:
+                premium = (best["bid"] + best["ask"]) / 2
+                result["contracts"] = [f"买 Put ${best['strike']} exp {best['expiry']} @${premium:.2f} IV={best['iv']:.0f}% Δ={best['delta']:.2f}"]
+                result["breakeven"] = round(best["strike"] - premium, 2)
+                result["max_loss"] = round(premium * 100, 0)
+                result["take_profit"] = f"≤${round(best['strike'] - premium * 2, 2)}"
+                result["risk_reward"] = "1:2+"
+            else:
+                strike = round_strike(price * 0.98, "itm")
+                result["contracts"] = [f"买 Put ${strike}/30-45天 (估算)"]
+                result["breakeven"] = round(strike * 0.97, 2)
+                result["max_loss"] = "权利金"
+                result["take_profit"] = f"≤${round(strike * 0.94, 2)}"
+                result["risk_reward"] = "1:2"
+        else:
+            result["strategy"] = "Bear Put Spread / 卖Call"
+            s_buy = round_strike(price * 0.98, "itm")
+            s_sell = round_strike(price * 0.92, "otm")
+            result["contracts"] = [f"买${s_buy}P / 卖${s_sell}P 30-60天 (估算)"]
+            result["breakeven"] = s_buy
+            result["max_loss"] = "净权利金"
+            result["take_profit"] = f"≤${s_sell}"
+            result["risk_reward"] = "1:1.5"
+    else:
+        # neutral
+        if vix >= 25:
+            result["strategy"] = "Iron Condor"
+            s1 = round_strike(price * 0.94, "otm")
+            s2 = round_strike(price * 0.97, "otm")
+            s3 = round_strike(price * 1.03, "otm")
+            s4 = round_strike(price * 1.06, "otm")
+            result["contracts"] = [f"Iron Condor: 卖${s2}P/${s3}C 买${s1}P/${s4}C (估算)"]
+            result["breakeven"] = f"${s2}-${s3}"
+            result["max_loss"] = "行权价差-净权利金"
+            result["take_profit"] = "权利金归零"
+            result["risk_reward"] = "1:1"
+        else:
+            result["strategy"] = "Bull Call Spread"
+            s_buy = round_strike(price * 0.97, "itm")
+            s_sell = round_strike(price * 1.03, "otm")
+            result["contracts"] = [f"买${s_buy}C / 卖${s_sell}C 30-60天 (估算)"]
+            result["breakeven"] = s_buy
+            result["max_loss"] = "净权利金"
+            result["take_profit"] = f"≥${s_sell}"
+            result["risk_reward"] = "1:1.5"
+
+    # 附加 IV 信息
+    if liquid:
+        avg_iv = sum(c.get("iv", 0) for c in liquid[:5]) / max(len(liquid[:5]), 1)
+        result["avg_iv"] = round(avg_iv, 1)
+
+    return result
+
+# ─── 兼容旧接口 ─────────────────────────────────────────────────────────────
 
 def build_option_picks(scored_stocks, vix):
     """根据评分+VIX给出具体期权合约建议（前3只强买/买入股）
     支持短/中/长三档期限，行权价规整为合法档位
-    配置 LongPort 后可拉取真实期权链数据
     """
     buys = [s for s in scored_stocks if s["score"] > 58][:3]
     if not buys:
@@ -542,18 +812,13 @@ def build_option_picks(scored_stocks, vix):
         score = s["score"]
         direction = "bull" if score > 65 else "neutral"
 
-        # 尝试拉取真实期权链
-        real_chain = fetch_longport_option_chain(ticker)
-
         if direction == "bull":
             if vix < 25:
-                # 低IV：买入Call
-                strike_short = round_strike(price * 1.02, "otm")   # 略OTM
+                strike_short = round_strike(price * 1.02, "otm")
                 strike_mid   = round_strike(price * 1.03, "otm")
                 strike_long  = round_strike(price * 1.05, "otm")
                 picks.append(f"{ticker} 买入Call ${strike_short}/30天 | ${strike_mid}/60天 | ${strike_long}/90天")
             else:
-                # 高IV：Bull Call Spread
                 s_buy  = round_strike(price * 0.98, "itm")
                 s_sell = round_strike(price * 1.05, "otm")
                 picks.append(f"{ticker} Bull Call Spread 买${s_buy}/卖${s_sell} | 30-60天")
@@ -567,16 +832,15 @@ def build_option_picks(scored_stocks, vix):
                 s2 = round_strike(price * 0.97, "itm")
                 picks.append(f"{ticker} Cash-Secured Put ${s1}/30天 | ${s2}/60天")
 
-        if real_chain:
-            picks[-1] += " [LongPort真实期权链已启用]"
-
     return picks
 
 # ─── AI 策略推理 ─────────────────────────────────────────────────────────────
 
-def ai_analyze(vix_data, scored_stocks, stock_news, macro_news):
+def ai_analyze(vix_data, scored_stocks, stock_news, macro_news, option_analyses=None):
     """调用 AI 进行深度策略推理（DeepSeek / Gemini）
-    不做简单总结，而是基于数据+新闻进行因果推理和风险挖掘"""
+    整合 Scrapling 新闻 + 期权分析，输出结构化结论：
+    简讯、情绪判断、核心事件、风险提示、期权交易参考
+    """
     if not AI_API_KEY:
         print("AI_API_KEY not set, skip AI analysis")
         return None
@@ -585,19 +849,29 @@ def ai_analyze(vix_data, scored_stocks, stock_news, macro_news):
     regime = get_vix_regime(vix)
     top10 = scored_stocks[:10]
 
-    # 构建上下文
+    # ── 构建上下文 ──
     ctx = f"## 市场环境\nVIX={vix:.1f}({regime['label']},模式:{regime['mode']}) 涨跌{vix_data['change']:+.1f}%\n\n"
+
+    # TOP10 评分
     ctx += "## TOP10评分\n"
     for i, s in enumerate(top10):
-        news_str = ""
-        if s["ticker"] in stock_news:
-            items = stock_news[s["ticker"]][:2]
-            news_str = " | 新闻:" + "; ".join([n["headline"] for n in items])
         pe_str = f"PE={s.get('pe')}" if s.get("pe") else "PE=N/A"
         ctx += (f"{i+1}. {s['ticker']} 评分{s['score']} {s['signal']} "
                 f"涨跌{s['change_pct']:+.1f}% {pe_str} 期权:{s['option_strategy']} "
-                f"仓位:{s['position']}{news_str}\n")
+                f"仓位:{s['position']}\n")
 
+    # Scrapling 深度新闻（按 ticker 分组）
+    if stock_news:
+        ctx += "\n## 个股深度新闻（Scrapling抓取）\n"
+        by_ticker = {}
+        for n in stock_news:
+            t = n.get("ticker", "")
+            by_ticker.setdefault(t, []).append(n["headline"])
+        for ticker in [s["ticker"] for s in top10]:
+            if ticker in by_ticker:
+                ctx += f"【{ticker}】" + " | ".join(by_ticker[ticker][:3]) + "\n"
+
+    # 宏观新闻
     if macro_news:
         all_h = []
         for cat in macro_news:
@@ -606,17 +880,39 @@ def ai_analyze(vix_data, scored_stocks, stock_news, macro_news):
         if all_h:
             ctx += "\n## 宏观新闻\n" + "\n".join([f"- {h}" for h in all_h[:8]])
 
+    # 期权深度分析
+    if option_analyses:
+        ctx += "\n## 期权链深度分析\n"
+        for oa in option_analyses:
+            ctx += f"【{oa['ticker']}】方向:{oa['direction']} 策略:{oa.get('strategy','')}"
+            if oa.get("avg_iv"):
+                ctx += f" IV={oa['avg_iv']}%"
+            if oa.get("contracts"):
+                ctx += f" 合约:{oa['contracts'][0]}"
+            if oa.get("breakeven"):
+                ctx += f" 盈亏平衡:${oa['breakeven']}"
+            if oa.get("max_loss"):
+                ctx += f" 最大亏损:{oa['max_loss']}"
+            if oa.get("risk_reward"):
+                ctx += f" 风险收益比:{oa['risk_reward']}"
+            ctx += "\n"
+
+    # ── Prompt ──
     prompt = f"""{ctx}
 
-你是资深美股量化分析师，擅长从新闻事件推理市场走势，而非简单复述。基于以上数据进行深度推理：
+你是资深美股量化+期权策略师。基于以上所有数据（行情+Scrapling深度新闻+期权链），进行深度推理，输出以下结构化结果：
 
-1. **市场研判**：VIX信号与宏观新闻的因果关联，市场所处阶段及潜在转折点
-2. **板块轮动**：从TOP10行业分布和涨跌推断资金流向，识别轮动信号和背离
-3. **个股推理**：前5只票的走势驱动因素，新闻是否支撑或削弱当前评分，有无被忽视的利空/利好
-4. **期权策略**：当前VIX环境下哪些策略真正占优，结合个股IV环境给出具体理由
-5. **遗漏风险**：量化评分可能遗漏的信号（事件驱动、情绪拐点、流动性风险等），需警惕的反向逻辑
+**1. 简讯**：用3-5句话概括今日TOP10个股的核心动态，不要罗列，要提炼因果逻辑
 
-中文回答，简洁有力，<500字，直接给结论，不要空话套话。"""
+**2. 情绪判断**：整体市场情绪为 [利好/中性/利空]，逐票给出情绪方向和关键依据（新闻事件+数据信号）
+
+**3. 核心事件**：列出3-5个最重要的事件驱动，标注影响的ticker和方向
+
+**4. 风险提示**：当前最需要警惕的2-3个风险（事件风险、流动性风险、IV风险、反向逻辑）
+
+**5. 期权交易建议**：结合期权链分析，给出1-2个最值得执行的期权策略，说明理由、合约选择、风控要点
+
+中文回答，简洁有力，直接给结论和依据，不要空话套话。"""
 
     try:
         if AI_PROVIDER == "gemini":
@@ -638,10 +934,10 @@ def _call_deepseek(prompt):
     payload = {
         "model": model,
         "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": 1000,
+        "max_tokens": 1500,
         "temperature": 0.7,
     }
-    r = requests.post(url, headers=headers, json=payload, timeout=60)
+    r = requests.post(url, headers=headers, json=payload, timeout=90)
     r.raise_for_status()
     data = r.json()
     return data["choices"][0]["message"]["content"].strip()
@@ -652,9 +948,9 @@ def _call_gemini(prompt):
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={AI_API_KEY}"
     payload = {
         "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {"maxOutputTokens": 1000, "temperature": 0.7},
+        "generationConfig": {"maxOutputTokens": 1500, "temperature": 0.7},
     }
-    r = requests.post(url, json=payload, timeout=60)
+    r = requests.post(url, json=payload, timeout=90)
     r.raise_for_status()
     data = r.json()
     return data["candidates"][0]["content"]["parts"][0]["text"].strip()
@@ -683,7 +979,7 @@ WEIGHT_LABELS = {
     "position":   "趋势位",
 }
 
-def build_feishu_text(vix_data, scored_stocks, push_type, stock_news=None, macro_news=None, ai_summary=None):
+def build_feishu_text(vix_data, scored_stocks, push_type, stock_news=None, macro_news=None, ai_summary=None, option_analyses=None):
     now_bjt = datetime.now(BJT).strftime("%Y-%m-%d %H:%M")
     vix     = vix_data["price"]
     vix_chg = vix_data["change"]
@@ -773,20 +1069,45 @@ def build_feishu_text(vix_data, scored_stocks, push_type, stock_news=None, macro
             lines.append(f"  · {n['headline']}")
         lines.append("")
 
-    # 个股新闻
+    # 个股深度新闻（Scrapling）
     if stock_news:
-        lines.append("📋 个股新闻")
-        for ticker, news_items in stock_news.items():
-            for n in news_items[:2]:
-                lines.append(f"  · [{ticker}] {n['headline']}")
+        lines.append("📋 个股深度新闻")
+        by_ticker = {}
+        for n in stock_news:
+            t = n.get("ticker", "")
+            by_ticker.setdefault(t, []).append(n)
+        for ticker in [s["ticker"] for s in scored_stocks[:10]]:
+            if ticker in by_ticker:
+                for n in by_ticker[ticker][:3]:
+                    lines.append(f"  · [{ticker}] [{n.get('source','')}] {n['headline']}")
         lines.append("")
 
-    # 期权合约建议
+    # 期权合约建议（基础版）
     option_picks = build_option_picks(scored_stocks, vix)
     if option_picks:
         lines.append("🎯 期权合约建议")
         for p in option_picks:
             lines.append(f"  ▸ {p}")
+        lines.append("")
+
+    # 期权深度分析（LongPort + AI）
+    if option_analyses:
+        lines.append("📊 期权链深度分析")
+        for oa in option_analyses:
+            iv_str = f" IV={oa['avg_iv']}%" if oa.get("avg_iv") else ""
+            lines.append(f"  【{oa['ticker']}】{oa.get('strategy','')} | 方向:{oa['direction']}{iv_str}")
+            for c in oa.get("contracts", []):
+                lines.append(f"    ▸ {c}")
+            if oa.get("breakeven"):
+                lines.append(f"    盈亏平衡: ${oa['breakeven']}")
+            if oa.get("max_loss"):
+                lines.append(f"    最大亏损: {oa['max_loss']}")
+            if oa.get("take_profit"):
+                lines.append(f"    止盈区间: {oa['take_profit']}")
+            if oa.get("risk_reward"):
+                lines.append(f"    风险收益比: {oa['risk_reward']}")
+            data_src = "LongPort真实数据" if oa.get("real_data") else "估算值"
+            lines.append(f"    数据源: {data_src}")
         lines.append("")
 
     # AI 策略研判
@@ -869,20 +1190,27 @@ def main():
         sys.exit(1)
     print(f"Scored {len(scored)} stocks, top: {scored[0]['ticker']} ({scored[0]['score']})")
 
-    # 4. 拉个股新闻（TOP10）
+    # 4. Scrapling 深度抓取个股新闻（TOP10，≥20条）
     top10_tickers = [s["ticker"] for s in scored[:10]]
-    stock_news = fetch_stock_news(top10_tickers)
+    stock_news = scrapling_news(top10_tickers, min_total=20)
 
     # 5. 拉宏观新闻
     macro_news = fetch_news(vix)
 
-    # 6. AI 策略推理
-    ai_summary = ai_analyze(vix_data, scored, stock_news, macro_news)
+    # 6. 期权深度分析（TOP3 买入股）
+    top_buys = [s for s in scored if s["score"] > 58][:3]
+    option_analyses = []
+    for s in top_buys:
+        oa = option_analysis(s["ticker"], s["price"], s["score"], vix)
+        option_analyses.append(oa)
 
-    # 7. 构建消息
-    text = build_feishu_text(vix_data, scored, push_type, stock_news, macro_news, ai_summary)
+    # 7. AI 策略推理（整合新闻+期权分析）
+    ai_summary = ai_analyze(vix_data, scored, stock_news, macro_news, option_analyses)
 
-    # 8. 推送
+    # 8. 构建消息
+    text = build_feishu_text(vix_data, scored, push_type, stock_news, macro_news, ai_summary, option_analyses)
+
+    # 9. 推送
     success = push_to_feishu(text)
     sys.exit(0 if success else 1)
 
