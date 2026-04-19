@@ -17,6 +17,10 @@ FEISHU_WEBHOOK  = os.environ.get("FEISHU_WEBHOOK_URL", "")
 TWELVE_DATA_KEY = os.environ.get("TWELVE_DATA_API_KEY", "")
 FINNHUB_KEY     = os.environ.get("FINNHUB_API_KEY", "")
 PUSH_TYPE       = os.environ.get("PUSH_TYPE", "morning")  # morning/open/midday/close
+AI_PROVIDER     = os.environ.get("AI_PROVIDER", "deepseek")  # deepseek / gemini
+AI_API_KEY      = os.environ.get("AI_API_KEY", "")
+AI_BASE_URL     = os.environ.get("AI_BASE_URL", "")          # override for custom endpoint
+AI_MODEL        = os.environ.get("AI_MODEL", "")             # auto-detect if empty
 
 BJT = timezone(timedelta(hours=8))
 
@@ -425,11 +429,11 @@ def fetch_news(vix=None):
                 for item in root.findall(".//item")[:3]:
                     title = item.findtext("title", "").strip()
                     title_key = title[:60].lower()
-                if title_key in seen or not title:
-                    continue
-                seen.add(title_key)
-                cn = translate_to_cn(title)
-                all_news.append({"headline": cn, "source": "Google News", "category": section})
+                    if title_key in seen or not title:
+                        continue
+                    seen.add(title_key)
+                    cn = translate_to_cn(title)
+                    all_news.append({"headline": cn, "source": "Google News", "category": section})
             except Exception:
                 continue
             time.sleep(0.3)
@@ -443,6 +447,33 @@ def fetch_news(vix=None):
     world = [n for n in all_news if n["category"] in ("world", "politics")][:3]
     tech = [n for n in all_news if n["category"] == "technology"][:2]
     return market, business, world, tech
+
+def fetch_stock_news(tickers, days=3):
+    """为指定个股拉取近期新闻（Finnhub company-news），每只最多3条"""
+    results = {}
+    if not FINNHUB_KEY:
+        return results
+    from_date = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%d")
+    to_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    for ticker in tickers:
+        try:
+            url = (f"https://finnhub.io/api/v1/company-news?symbol={ticker}"
+                   f"&from={from_date}&to={to_date}&token={FINNHUB_KEY}")
+            r = requests.get(url, timeout=8)
+            items = r.json()
+            news_items = []
+            for n in items[:3]:
+                headline = n.get("headline", "")
+                if headline:
+                    cn = translate_to_cn(headline)
+                    news_items.append({"headline": cn, "source": n.get("source", ""), "ticker": ticker})
+            if news_items:
+                results[ticker] = news_items
+        except Exception:
+            continue
+        time.sleep(1.2)  # Finnhub 60次/分钟限制
+    print(f"Stock news: {len(results)} tickers with news")
+    return results
 
 # ─── 期权合约建议 ─────────────────────────────────────────────────────────────
 
@@ -541,6 +572,93 @@ def build_option_picks(scored_stocks, vix):
 
     return picks
 
+# ─── AI 策略推理 ─────────────────────────────────────────────────────────────
+
+def ai_analyze(vix_data, scored_stocks, stock_news, macro_news):
+    """调用 AI 进行深度策略推理（DeepSeek / Gemini）
+    不做简单总结，而是基于数据+新闻进行因果推理和风险挖掘"""
+    if not AI_API_KEY:
+        print("AI_API_KEY not set, skip AI analysis")
+        return None
+
+    vix = vix_data["price"]
+    regime = get_vix_regime(vix)
+    top10 = scored_stocks[:10]
+
+    # 构建上下文
+    ctx = f"## 市场环境\nVIX={vix:.1f}({regime['label']},模式:{regime['mode']}) 涨跌{vix_data['change']:+.1f}%\n\n"
+    ctx += "## TOP10评分\n"
+    for i, s in enumerate(top10):
+        news_str = ""
+        if s["ticker"] in stock_news:
+            items = stock_news[s["ticker"]][:2]
+            news_str = " | 新闻:" + "; ".join([n["headline"] for n in items])
+        pe_str = f"PE={s.get('pe')}" if s.get("pe") else "PE=N/A"
+        ctx += (f"{i+1}. {s['ticker']} 评分{s['score']} {s['signal']} "
+                f"涨跌{s['change_pct']:+.1f}% {pe_str} 期权:{s['option_strategy']} "
+                f"仓位:{s['position']}{news_str}\n")
+
+    if macro_news:
+        all_h = []
+        for cat in macro_news:
+            for n in cat[:2]:
+                all_h.append(n["headline"])
+        if all_h:
+            ctx += "\n## 宏观新闻\n" + "\n".join([f"- {h}" for h in all_h[:8]])
+
+    prompt = f"""{ctx}
+
+你是资深美股量化分析师，擅长从新闻事件推理市场走势，而非简单复述。基于以上数据进行深度推理：
+
+1. **市场研判**：VIX信号与宏观新闻的因果关联，市场所处阶段及潜在转折点
+2. **板块轮动**：从TOP10行业分布和涨跌推断资金流向，识别轮动信号和背离
+3. **个股推理**：前5只票的走势驱动因素，新闻是否支撑或削弱当前评分，有无被忽视的利空/利好
+4. **期权策略**：当前VIX环境下哪些策略真正占优，结合个股IV环境给出具体理由
+5. **遗漏风险**：量化评分可能遗漏的信号（事件驱动、情绪拐点、流动性风险等），需警惕的反向逻辑
+
+中文回答，简洁有力，<500字，直接给结论，不要空话套话。"""
+
+    try:
+        if AI_PROVIDER == "gemini":
+            result = _call_gemini(prompt)
+        else:
+            result = _call_deepseek(prompt)
+        print(f"AI analysis OK ({len(result)} chars)")
+        return result
+    except Exception as e:
+        print(f"AI analysis failed: {e}")
+        return None
+
+def _call_deepseek(prompt):
+    """DeepSeek API（OpenAI 兼容格式），也兼容任何 OpenAI 格式的端点"""
+    base = AI_BASE_URL or "https://api.deepseek.com"
+    model = AI_MODEL or "deepseek-chat"
+    url = f"{base}/chat/completions"
+    headers = {"Authorization": f"Bearer {AI_API_KEY}", "Content-Type": "application/json"}
+    payload = {
+        "model": model,
+        "messages": [{"role": "user", "content": prompt}],
+        "max_tokens": 1000,
+        "temperature": 0.7,
+    }
+    r = requests.post(url, headers=headers, json=payload, timeout=60)
+    r.raise_for_status()
+    data = r.json()
+    return data["choices"][0]["message"]["content"].strip()
+
+def _call_gemini(prompt):
+    """Google Gemini API"""
+    model = AI_MODEL or "gemini-2.0-flash"
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={AI_API_KEY}"
+    payload = {
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {"maxOutputTokens": 1000, "temperature": 0.7},
+    }
+    r = requests.post(url, json=payload, timeout=60)
+    r.raise_for_status()
+    data = r.json()
+    return data["candidates"][0]["content"]["parts"][0]["text"].strip()
+
 # ─── 飞书消息构建 ─────────────────────────────────────────────────────────────
 
 PUSH_TITLES = {
@@ -565,7 +683,7 @@ WEIGHT_LABELS = {
     "position":   "趋势位",
 }
 
-def build_feishu_text(vix_data, scored_stocks, push_type):
+def build_feishu_text(vix_data, scored_stocks, push_type, stock_news=None, macro_news=None, ai_summary=None):
     now_bjt = datetime.now(BJT).strftime("%Y-%m-%d %H:%M")
     vix     = vix_data["price"]
     vix_chg = vix_data["change"]
@@ -629,8 +747,11 @@ def build_feishu_text(vix_data, scored_stocks, push_type):
         lines.append(f"🔥 强买信号（评分>72）：{sb_list}")
         lines.append("")
 
-    # 新闻
-    market_news, business_news, world_news, tech_news = fetch_news(vix)
+    # 宏观新闻
+    if macro_news:
+        market_news, business_news, world_news, tech_news = macro_news
+    else:
+        market_news, business_news, world_news, tech_news = [], [], [], []
     if market_news:
         lines.append("📰 市场要闻")
         for n in market_news:
@@ -652,12 +773,28 @@ def build_feishu_text(vix_data, scored_stocks, push_type):
             lines.append(f"  · {n['headline']}")
         lines.append("")
 
+    # 个股新闻
+    if stock_news:
+        lines.append("📋 个股新闻")
+        for ticker, news_items in stock_news.items():
+            for n in news_items[:2]:
+                lines.append(f"  · [{ticker}] {n['headline']}")
+        lines.append("")
+
     # 期权合约建议
     option_picks = build_option_picks(scored_stocks, vix)
     if option_picks:
         lines.append("🎯 期权合约建议")
         for p in option_picks:
             lines.append(f"  ▸ {p}")
+        lines.append("")
+
+    # AI 策略研判
+    if ai_summary:
+        lines.append("🤖 AI 策略研判")
+        for line in ai_summary.split("\n"):
+            if line.strip():
+                lines.append(f"  {line.strip()}")
         lines.append("")
 
     lines.append(f"⏰ {now_bjt} 北京时间 · 选股播报推送消息 · 数据仅供参考")
@@ -723,6 +860,7 @@ def main():
             "position":        get_position(score, vix),
             "price":           q["price"],
             "change_pct":      q["change_pct"],
+            "pe":              q.get("pe"),
         })
     scored.sort(key=lambda x: x["score"], reverse=True)
 
@@ -731,10 +869,20 @@ def main():
         sys.exit(1)
     print(f"Scored {len(scored)} stocks, top: {scored[0]['ticker']} ({scored[0]['score']})")
 
-    # 4. 构建消息
-    text = build_feishu_text(vix_data, scored, push_type)
+    # 4. 拉个股新闻（TOP10）
+    top10_tickers = [s["ticker"] for s in scored[:10]]
+    stock_news = fetch_stock_news(top10_tickers)
 
-    # 5. 推送
+    # 5. 拉宏观新闻
+    macro_news = fetch_news(vix)
+
+    # 6. AI 策略推理
+    ai_summary = ai_analyze(vix_data, scored, stock_news, macro_news)
+
+    # 7. 构建消息
+    text = build_feishu_text(vix_data, scored, push_type, stock_news, macro_news, ai_summary)
+
+    # 8. 推送
     success = push_to_feishu(text)
     sys.exit(0 if success else 1)
 
