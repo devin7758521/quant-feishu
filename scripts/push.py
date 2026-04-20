@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # scripts/push.py
-# 拉取实时行情 + VIX → 计算量化评分 → Scrapling深度新闻 → 长桥期权分析 → AI推理 → 推送飞书
+# 拉取实时行情 + VIX → 计算量化评分 → Scrapling深度新闻 → 长桥期权分析 → AI个股推理+宏观推理 → 推送飞书
 # 数据源: Twelve Data (主) + Finnhub (补缺) + Yahoo/FRED VIX + Scrapling + LongPort
 
 import os
@@ -18,11 +18,47 @@ FEISHU_WEBHOOK  = os.environ.get("FEISHU_WEBHOOK_URL", "")
 TWELVE_DATA_KEY = os.environ.get("TWELVE_DATA_API_KEY", "")
 FINNHUB_KEY     = os.environ.get("FINNHUB_API_KEY", "")
 PUSH_TYPE       = os.environ.get("PUSH_TYPE", "morning")  # morning/open/midday/close
-AI_PROVIDER     = os.environ.get("AI_PROVIDER", "deepseek")  # deepseek / gemini
-AI_API_KEY      = os.environ.get("AI_API_KEY", "")
-AI_BASE_URL     = os.environ.get("AI_BASE_URL", "")          # override for custom endpoint
-AI_MODEL        = os.environ.get("AI_MODEL", "")             # auto-detect if empty
 SCRAPLING_MODE  = os.environ.get("SCRAPLING_MODE", "basic")  # basic / stealth
+
+# ─── AI 配置：三API降级轮换 ──────────────────────────────────────────────────
+# 优先级: deepseek → gemini1 → gemini2
+# 轮换: 每次调用自动切换到下一个可用API，失败则降级
+AI_PROVIDERS = []
+_ds_key = os.environ.get("DEEPSEEK_API_KEY", "")
+if _ds_key:
+    AI_PROVIDERS.append({
+        "name": "deepseek",
+        "api_key": _ds_key,
+        "base_url": os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com"),
+        "model": os.environ.get("DEEPSEEK_MODEL", "deepseek-chat"),
+    })
+_g1_key = os.environ.get("GEMINI_API_KEY", "")
+if _g1_key:
+    AI_PROVIDERS.append({
+        "name": "gemini",
+        "api_key": _g1_key,
+        "model": os.environ.get("GEMINI_MODEL", "gemini-2.0-flash"),
+    })
+_g2_key = os.environ.get("GEMINI_API_KEY_2", "")
+if _g2_key:
+    AI_PROVIDERS.append({
+        "name": "gemini2",
+        "api_key": _g2_key,
+        "model": os.environ.get("GEMINI_MODEL_2", "gemini-2.0-flash"),
+    })
+
+# 兼容旧环境变量
+if not AI_PROVIDERS:
+    _fallback_key = os.environ.get("AI_API_KEY", "")
+    if _fallback_key:
+        AI_PROVIDERS.append({
+            "name": os.environ.get("AI_PROVIDER", "deepseek"),
+            "api_key": _fallback_key,
+            "base_url": os.environ.get("AI_BASE_URL", "https://api.deepseek.com"),
+            "model": os.environ.get("AI_MODEL", "deepseek-chat"),
+        })
+
+_ai_provider_idx = 0  # 轮换索引
 
 BJT = timezone(timedelta(hours=8))
 
@@ -1038,15 +1074,174 @@ def build_option_picks(scored_stocks, vix):
 
     return picks
 
-# ─── AI 策略推理 ─────────────────────────────────────────────────────────────
+# ─── AI 策略推理（三API降级轮换）───────────────────────────────────────────────
 
-def ai_analyze(vix_data, scored_stocks, stock_news, macro_news, option_analyses=None):
-    """调用 AI 进行深度策略推理（DeepSeek / Gemini）
-    整合 Scrapling 新闻 + 期权分析，输出结构化结论：
-    简讯、情绪判断、核心事件、风险提示、期权交易参考
+def ai_call(prompt, json_mode=False, max_retries=3):
+    """统一 AI 调用入口：三API降级轮换
+    优先级: deepseek → gemini → gemini2
+    每次调用自动轮换到下一个 provider，失败则降级
+    json_mode=True 时强制要求 JSON 输出
     """
-    if not AI_API_KEY:
-        print("AI_API_KEY not set, skip AI analysis")
+    global _ai_provider_idx
+    if not AI_PROVIDERS:
+        print("No AI provider configured, skip")
+        return None
+
+    providers_tried = []
+    for attempt in range(max_retries):
+        # 轮换选择 provider
+        idx = (_ai_provider_idx + attempt) % len(AI_PROVIDERS)
+        p = AI_PROVIDERS[idx]
+        if p["name"] in providers_tried:
+            continue
+        providers_tried.append(p["name"])
+
+        try:
+            result = _do_ai_call(p, prompt, json_mode)
+            # 成功则轮换到下一个
+            _ai_provider_idx = (idx + 1) % len(AI_PROVIDERS)
+            print(f"  AI call OK via {p['name']}")
+            return result
+        except Exception as e:
+            print(f"  AI {p['name']} failed: {e}, trying next...")
+            continue
+
+    print("All AI providers failed")
+    return None
+
+def _do_ai_call(provider, prompt, json_mode=False):
+    """执行单个 API 调用"""
+    name = provider["name"]
+    key = provider["api_key"]
+
+    if name == "deepseek":
+        return _call_openai_compat(provider, prompt, json_mode)
+    elif name in ("gemini", "gemini2"):
+        return _call_gemini(provider, prompt, json_mode)
+    else:
+        raise ValueError(f"Unknown provider: {name}")
+
+def _call_openai_compat(provider, prompt, json_mode=False):
+    """OpenAI 兼容格式 API（DeepSeek 等）"""
+    url = f"{provider['base_url']}/chat/completions"
+    headers = {"Authorization": f"Bearer {provider['api_key']}", "Content-Type": "application/json"}
+    payload = {
+        "model": provider["model"],
+        "messages": [{"role": "user", "content": prompt}],
+        "max_tokens": 1500,
+        "temperature": 0.7,
+    }
+    if json_mode:
+        payload["response_format"] = {"type": "json_object"}
+    r = requests.post(url, headers=headers, json=payload, timeout=90)
+    r.raise_for_status()
+    data = r.json()
+    return data["choices"][0]["message"]["content"].strip()
+
+def _call_gemini(provider, prompt, json_mode=False):
+    """Google Gemini API（参照官方 google-generativeai SDK 逻辑，用 REST 调用）"""
+    model = provider["model"]
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={provider['api_key']}"
+    payload = {
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {"maxOutputTokens": 1500, "temperature": 0.7},
+    }
+    if json_mode:
+        payload["generationConfig"]["responseMimeType"] = "application/json"
+    r = requests.post(url, json=payload, timeout=90)
+    r.raise_for_status()
+    data = r.json()
+    return data["candidates"][0]["content"]["parts"][0]["text"].strip()
+
+
+def stock_reasoning(ticker, stock_data, news_list):
+    """个股新闻汇总与逻辑推理（参照 stock_reasoning_skill）
+    输入: ticker, 盘面数据str, 新闻列表
+    输出: {"rating": 0-5, "reason": "推理逻辑"}
+    """
+    prompt = f"""你是一位拥有顶级投行经验的资深量化分析师和基本面研究员。
+
+【输入数据】
+- 目标股票：{ticker}
+- 近期盘面/关键数据：{stock_data}
+- 近期相关新闻：{news_list}
+
+【任务与推理链】
+请在后台静默执行以下思考：
+1. 降噪：剔除公关废话，提取2-3个对基本面有实质影响的核心事件。
+2. 驱动力分析：评估核心事件对短期情绪和中长期盈利的利弊。
+3. 预期差推演：对比新闻事件的利好/利空是否已反映在盘面数据中？大众的第一反应是否有误判？
+
+【输出要求】
+你必须且只能输出一个有效的 JSON 对象，不要包含任何 Markdown 标记或额外的解释文字。
+JSON 结构必须严格如下：
+{{"rating": <0到5之间的整数>, "reason": "<50-100字的简短段落，一针见血地说明给出该评级的核心推理逻辑。直接切入要害。>"}}"""
+
+    result = ai_call(prompt, json_mode=True)
+    if not result:
+        return {"rating": 0, "reason": "AI调用失败"}
+
+    try:
+        return json.loads(result)
+    except json.JSONDecodeError:
+        # 尝试提取 JSON 片段
+        import re
+        m = re.search(r'\{[^{}]*"rating"[^{}]*\}', result, re.DOTALL)
+        if m:
+            try:
+                return json.loads(m.group())
+            except json.JSONDecodeError:
+                pass
+        print(f"  [{ticker}] AI output not valid JSON: {result[:100]}")
+        return {"rating": 0, "reason": "AI输出格式错误"}
+
+
+def batch_stock_reasoning(scored_stocks, stock_news):
+    """批量个股推理：TOP10 逐只调用 AI 新闻汇总分析
+    返回: dict {ticker: {"rating": int, "reason": str}}
+    """
+    if not AI_PROVIDERS:
+        print("No AI provider, skip stock reasoning")
+        return {}
+
+    # 按ticker分组新闻
+    news_by_ticker = {}
+    for n in stock_news:
+        t = n.get("ticker", "")
+        news_by_ticker.setdefault(t, []).append(n["headline"])
+
+    results = {}
+    top10 = scored_stocks[:10]
+    for i, s in enumerate(top10):
+        ticker = s["ticker"]
+        # 组装盘面数据
+        pe_str = f"PE={s.get('pe')}" if s.get("pe") else "PE=N/A"
+        stock_data = (
+            f"量化评分:{s['score']}({s['signal']}) "
+            f"涨跌:{s['change_pct']:+.1f}% {pe_str} "
+            f"期权策略:{s['option_strategy']} 建议仓位:{s['position']}"
+        )
+        # 组装新闻
+        headlines = news_by_ticker.get(ticker, [])
+        news_str = "\n".join([f"- {h}" for h in headlines[:5]]) if headlines else "暂无相关新闻"
+
+        print(f"  Reasoning [{i+1}/10] {ticker}...")
+        result = stock_reasoning(ticker, stock_data, news_str)
+        results[ticker] = result
+        time.sleep(0.5)  # 避免触发限流
+
+    print(f"Stock reasoning done: {len(results)} stocks")
+    return results
+
+
+def ai_analyze(vix_data, scored_stocks, stock_news, macro_news,
+               option_analyses=None, stock_reasonings=None):
+    """调用 AI 进行宏观策略推理（三API降级轮换）
+    整合: 量化评分 + 个股推理结果 + Scrapling新闻 + 期权链分析
+    输出: 简讯、情绪判断、核心事件、风险提示、期权交易建议
+    """
+    if not AI_PROVIDERS:
+        print("No AI provider, skip AI analysis")
         return None
 
     vix = vix_data["price"]
@@ -1056,13 +1251,17 @@ def ai_analyze(vix_data, scored_stocks, stock_news, macro_news, option_analyses=
     # ── 构建上下文 ──
     ctx = f"## 市场环境\nVIX={vix:.1f}({regime['label']},模式:{regime['mode']}) 涨跌{vix_data['change']:+.1f}%\n\n"
 
-    # TOP10 评分
+    # TOP10 评分 + AI评级
     ctx += "## TOP10评分\n"
     for i, s in enumerate(top10):
         pe_str = f"PE={s.get('pe')}" if s.get("pe") else "PE=N/A"
+        ai_r = stock_reasonings.get(s["ticker"], {}) if stock_reasonings else {}
+        rating_str = f" AI评级:{ai_r.get('rating','-')}星" if ai_r.get("rating") else ""
         ctx += (f"{i+1}. {s['ticker']} 评分{s['score']} {s['signal']} "
                 f"涨跌{s['change_pct']:+.1f}% {pe_str} 期权:{s['option_strategy']} "
-                f"仓位:{s['position']}\n")
+                f"仓位:{s['position']}{rating_str}\n")
+        if ai_r.get("reason"):
+            ctx += f"   AI推理: {ai_r['reason']}\n"
 
     # Scrapling 深度新闻（按 ticker 分组）
     if stock_news:
@@ -1101,7 +1300,6 @@ def ai_analyze(vix_data, scored_stocks, stock_news, macro_news, option_analyses=
                 ctx += f" 风险收益比:{oa['risk_reward']}"
             if oa.get("signal_shift"):
                 ctx += f" ⚠️{oa['signal_shift']}"
-            # 异动数据
             unusual = oa.get("unusual_activity", [])
             if unusual:
                 ctx += "\n  期权异动:"
@@ -1112,7 +1310,7 @@ def ai_analyze(vix_data, scored_stocks, stock_news, macro_news, option_analyses=
     # ── Prompt ──
     prompt = f"""{ctx}
 
-你是资深美股量化+期权策略师。基于以上所有数据（行情+Scrapling深度新闻+期权链），进行深度推理，输出以下结构化结果：
+你是资深美股量化+期权策略师。基于以上所有数据（行情+个股AI推理+Scrapling深度新闻+期权链），进行深度推理，输出以下结构化结果：
 
 **1. 简讯**：用3-5句话概括今日TOP10个股的核心动态，不要罗列，要提炼因果逻辑
 
@@ -1126,46 +1324,10 @@ def ai_analyze(vix_data, scored_stocks, stock_news, macro_news, option_analyses=
 
 中文回答，简洁有力，直接给结论和依据，不要空话套话。"""
 
-    try:
-        if AI_PROVIDER == "gemini":
-            result = _call_gemini(prompt)
-        else:
-            result = _call_deepseek(prompt)
-        print(f"AI analysis OK ({len(result)} chars)")
-        return result
-    except Exception as e:
-        print(f"AI analysis failed: {e}")
-        return None
-
-def _call_deepseek(prompt):
-    """DeepSeek API（OpenAI 兼容格式），也兼容任何 OpenAI 格式的端点"""
-    base = AI_BASE_URL or "https://api.deepseek.com"
-    model = AI_MODEL or "deepseek-chat"
-    url = f"{base}/chat/completions"
-    headers = {"Authorization": f"Bearer {AI_API_KEY}", "Content-Type": "application/json"}
-    payload = {
-        "model": model,
-        "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": 1500,
-        "temperature": 0.7,
-    }
-    r = requests.post(url, headers=headers, json=payload, timeout=90)
-    r.raise_for_status()
-    data = r.json()
-    return data["choices"][0]["message"]["content"].strip()
-
-def _call_gemini(prompt):
-    """Google Gemini API"""
-    model = AI_MODEL or "gemini-2.0-flash"
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={AI_API_KEY}"
-    payload = {
-        "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {"maxOutputTokens": 1500, "temperature": 0.7},
-    }
-    r = requests.post(url, json=payload, timeout=90)
-    r.raise_for_status()
-    data = r.json()
-    return data["candidates"][0]["content"]["parts"][0]["text"].strip()
+    result = ai_call(prompt)
+    if result:
+        print(f"AI macro analysis OK ({len(result)} chars)")
+    return result
 
 # ─── 飞书消息构建 ─────────────────────────────────────────────────────────────
 
@@ -1191,7 +1353,7 @@ WEIGHT_LABELS = {
     "position":   "趋势位",
 }
 
-def build_feishu_text(vix_data, scored_stocks, push_type, stock_news=None, macro_news=None, ai_summary=None, option_analyses=None):
+def build_feishu_text(vix_data, scored_stocks, push_type, stock_news=None, macro_news=None, ai_summary=None, option_analyses=None, stock_reasonings=None):
     now_bjt = datetime.now(BJT).strftime("%Y-%m-%d %H:%M")
     vix     = vix_data["price"]
     vix_chg = vix_data["change"]
@@ -1220,11 +1382,16 @@ def build_feishu_text(vix_data, scored_stocks, push_type, stock_news=None, macro
         chg = s["change_pct"]
         chg_str = f"+{chg:.1f}%" if chg >= 0 else f"{chg:.1f}%"
         chg_icon = "📈" if chg >= 0 else "📉"
+        # AI 评级
+        ai_r = stock_reasonings.get(s["ticker"], {}) if stock_reasonings else {}
+        ai_stars = f" ⭐{ai_r.get('rating','-')}" if ai_r.get("rating") else ""
         lines.append(
             f"  {i+1}. {s['ticker']} {s['signal']}  "
-            f"评分{s['score']}  {chg_icon}{chg_str}  "
+            f"评分{s['score']}  {chg_icon}{chg_str}{ai_stars}  "
             f"💡{s['option_strategy']}  📦{s['position']}"
         )
+        if ai_r.get("reason"):
+            lines.append(f"     AI: {ai_r['reason']}")
     lines.append("")
 
     # 异动股
@@ -1425,13 +1592,16 @@ def main():
         oa = option_analysis(s["ticker"], s["price"], s["score"], vix)
         option_analyses.append(oa)
 
-    # 7. AI 策略推理（整合新闻+期权分析）
-    ai_summary = ai_analyze(vix_data, scored, stock_news, macro_news, option_analyses)
+    # 7. AI 个股新闻推理（TOP10逐只）
+    stock_reasonings = batch_stock_reasoning(scored, stock_news)
 
-    # 8. 构建消息
-    text = build_feishu_text(vix_data, scored, push_type, stock_news, macro_news, ai_summary, option_analyses)
+    # 8. AI 宏观策略推理（整合个股推理+期权分析）
+    ai_summary = ai_analyze(vix_data, scored, stock_news, macro_news, option_analyses, stock_reasonings)
 
-    # 9. 推送
+    # 9. 构建消息
+    text = build_feishu_text(vix_data, scored, push_type, stock_news, macro_news, ai_summary, option_analyses, stock_reasonings)
+
+    # 10. 推送
     success = push_to_feishu(text)
     sys.exit(0 if success else 1)
 
