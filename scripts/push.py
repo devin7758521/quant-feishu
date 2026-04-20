@@ -1078,14 +1078,17 @@ def build_option_picks(scored_stocks, vix):
 
 def ai_call(prompt, json_mode=False, max_retries=3):
     """统一 AI 调用入口：三API降级轮换
-    优先级: deepseek → gemini → gemini2
+    优先级: gemini → gemini2 → deepseek
     每次调用自动轮换到下一个 provider，失败则降级
     json_mode=True 时强制要求 JSON 输出
     """
     global _ai_provider_idx
     if not AI_PROVIDERS:
-        print("No AI provider configured, skip")
+        print("[AI] No provider configured, skip")
         return None
+
+    print(f"[AI] Providers available: {[p['name'] for p in AI_PROVIDERS]}, current_idx={_ai_provider_idx}, json_mode={json_mode}")
+    print(f"[AI] Prompt length: {len(prompt)} chars")
 
     providers_tried = []
     for attempt in range(max_retries):
@@ -1096,17 +1099,21 @@ def ai_call(prompt, json_mode=False, max_retries=3):
             continue
         providers_tried.append(p["name"])
 
+        t0 = time.time()
         try:
+            print(f"[AI] Attempt {attempt+1}: calling {p['name']} (model={p['model']}, json_mode={json_mode})...")
             result = _do_ai_call(p, prompt, json_mode)
+            elapsed = time.time() - t0
             # 成功则轮换到下一个
             _ai_provider_idx = (idx + 1) % len(AI_PROVIDERS)
-            print(f"  AI call OK via {p['name']}")
+            print(f"[AI] ✅ {p['name']} OK ({elapsed:.1f}s, {len(result)} chars), next_idx={_ai_provider_idx}")
             return result
         except Exception as e:
-            print(f"  AI {p['name']} failed: {e}, trying next...")
+            elapsed = time.time() - t0
+            print(f"[AI] ❌ {p['name']} failed ({elapsed:.1f}s): {type(e).__name__}: {e}, trying next...")
             continue
 
-    print("All AI providers failed")
+    print(f"[AI] All providers failed (tried: {providers_tried})")
     return None
 
 def _do_ai_call(provider, prompt, json_mode=False):
@@ -1124,7 +1131,7 @@ def _do_ai_call(provider, prompt, json_mode=False):
 def _call_openai_compat(provider, prompt, json_mode=False):
     """OpenAI 兼容格式 API（DeepSeek 等）"""
     url = f"{provider['base_url']}/chat/completions"
-    headers = {"Authorization": f"Bearer {provider['api_key']}", "Content-Type": "application/json"}
+    headers = {"Authorization": f"Bearer {provider['api_key'][:8]}...", "Content-Type": "application/json"}
     payload = {
         "model": provider["model"],
         "messages": [{"role": "user", "content": prompt}],
@@ -1133,25 +1140,36 @@ def _call_openai_compat(provider, prompt, json_mode=False):
     }
     if json_mode:
         payload["response_format"] = {"type": "json_object"}
-    r = requests.post(url, headers=headers, json=payload, timeout=90)
+    print(f"[AI] POST {url} model={provider['model']} json_mode={json_mode}")
+    r = requests.post(url, headers={"Authorization": f"Bearer {provider['api_key']}", "Content-Type": "application/json"},
+                      json=payload, timeout=90)
+    print(f"[AI] Response: status={r.status_code}, len={len(r.text)}")
     r.raise_for_status()
     data = r.json()
-    return data["choices"][0]["message"]["content"].strip()
+    content = data["choices"][0]["message"]["content"].strip()
+    print(f"[AI] OpenAI-compat result: {len(content)} chars, preview={content[:80]}...")
+    return content
 
 def _call_gemini(provider, prompt, json_mode=False):
     """Google Gemini API（参照官方 google-generativeai SDK 逻辑，用 REST 调用）"""
     model = provider["model"]
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={provider['api_key']}"
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={provider['api_key'][:8]}..."
     payload = {
         "contents": [{"parts": [{"text": prompt}]}],
         "generationConfig": {"maxOutputTokens": 1500, "temperature": 0.7},
     }
     if json_mode:
         payload["generationConfig"]["responseMimeType"] = "application/json"
-    r = requests.post(url, json=payload, timeout=90)
+    print(f"[AI] POST generativelanguage.googleapis.com model={model} json_mode={json_mode}")
+    r = requests.post(
+        f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={provider['api_key']}",
+        json=payload, timeout=90)
+    print(f"[AI] Response: status={r.status_code}, len={len(r.text)}")
     r.raise_for_status()
     data = r.json()
-    return data["candidates"][0]["content"]["parts"][0]["text"].strip()
+    content = data["candidates"][0]["content"]["parts"][0]["text"].strip()
+    print(f"[AI] Gemini result: {len(content)} chars, preview={content[:80]}...")
+    return content
 
 
 def stock_reasoning(ticker, stock_data, news_list):
@@ -1179,20 +1197,25 @@ JSON 结构必须严格如下：
 
     result = ai_call(prompt, json_mode=True)
     if not result:
+        print(f"[AI] {ticker} reasoning: ai_call returned None")
         return {"rating": 0, "reason": "AI调用失败"}
 
     try:
-        return json.loads(result)
+        parsed = json.loads(result)
+        print(f"[AI] {ticker} reasoning parsed OK: rating={parsed.get('rating')}")
+        return parsed
     except json.JSONDecodeError:
         # 尝试提取 JSON 片段
         import re
         m = re.search(r'\{[^{}]*"rating"[^{}]*\}', result, re.DOTALL)
         if m:
             try:
-                return json.loads(m.group())
+                parsed = json.loads(m.group())
+                print(f"[AI] {ticker} reasoning extracted OK: rating={parsed.get('rating')}")
+                return parsed
             except json.JSONDecodeError:
                 pass
-        print(f"  [{ticker}] AI output not valid JSON: {result[:100]}")
+        print(f"[AI] {ticker} output not valid JSON: {result[:150]}")
         return {"rating": 0, "reason": "AI输出格式错误"}
 
 
@@ -1201,7 +1224,7 @@ def batch_stock_reasoning(scored_stocks, stock_news):
     返回: dict {ticker: {"rating": int, "reason": str}}
     """
     if not AI_PROVIDERS:
-        print("No AI provider, skip stock reasoning")
+        print("[AI] No provider, skip stock reasoning")
         return {}
 
     # 按ticker分组新闻
@@ -1212,6 +1235,7 @@ def batch_stock_reasoning(scored_stocks, stock_news):
 
     results = {}
     top10 = scored_stocks[:10]
+    print(f"[AI] Starting batch stock reasoning for {len(top10)} stocks...")
     for i, s in enumerate(top10):
         ticker = s["ticker"]
         # 组装盘面数据
@@ -1225,12 +1249,13 @@ def batch_stock_reasoning(scored_stocks, stock_news):
         headlines = news_by_ticker.get(ticker, [])
         news_str = "\n".join([f"- {h}" for h in headlines[:5]]) if headlines else "暂无相关新闻"
 
-        print(f"  Reasoning [{i+1}/10] {ticker}...")
+        print(f"[AI] Reasoning [{i+1}/10] {ticker} (news={len(headlines)})...")
         result = stock_reasoning(ticker, stock_data, news_str)
         results[ticker] = result
+        print(f"[AI] {ticker} => rating={result.get('rating','-')}, reason={result.get('reason','')[:60]}")
         time.sleep(0.5)  # 避免触发限流
 
-    print(f"Stock reasoning done: {len(results)} stocks")
+    print(f"[AI] Stock reasoning done: {len(results)} stocks")
     return results
 
 
@@ -1241,7 +1266,7 @@ def ai_analyze(vix_data, scored_stocks, stock_news, macro_news,
     输出: 简讯、情绪判断、核心事件、风险提示、期权交易建议
     """
     if not AI_PROVIDERS:
-        print("No AI provider, skip AI analysis")
+        print("[AI] No provider, skip AI analysis")
         return None
 
     vix = vix_data["price"]
@@ -1326,7 +1351,9 @@ def ai_analyze(vix_data, scored_stocks, stock_news, macro_news,
 
     result = ai_call(prompt)
     if result:
-        print(f"AI macro analysis OK ({len(result)} chars)")
+        print(f"[AI] Macro analysis OK ({len(result)} chars), preview: {result[:100]}...")
+    else:
+        print("[AI] Macro analysis FAILED - all providers returned nothing")
     return result
 
 # ─── 飞书消息构建 ─────────────────────────────────────────────────────────────
@@ -1587,21 +1614,27 @@ def main():
 
     # 6. 期权深度分析（TOP3 买入股）
     top_buys = [s for s in scored if s["score"] > 58][:3]
+    print(f"[STEP6] Option analysis: {len(top_buys)} buy candidates ({[s['ticker'] for s in top_buys]})")
     option_analyses = []
     for s in top_buys:
         oa = option_analysis(s["ticker"], s["price"], s["score"], vix)
         option_analyses.append(oa)
+    print(f"[STEP6] Option analyses done: {len(option_analyses)} results")
 
     # 7. AI 个股新闻推理（TOP10逐只）
+    print(f"[STEP7] Starting AI stock reasoning...")
     stock_reasonings = batch_stock_reasoning(scored, stock_news)
 
     # 8. AI 宏观策略推理（整合个股推理+期权分析）
+    print(f"[STEP8] Starting AI macro analysis...")
     ai_summary = ai_analyze(vix_data, scored, stock_news, macro_news, option_analyses, stock_reasonings)
 
     # 9. 构建消息
+    print(f"[STEP9] Building Feishu message...")
     text = build_feishu_text(vix_data, scored, push_type, stock_news, macro_news, ai_summary, option_analyses, stock_reasonings)
 
     # 10. 推送
+    print(f"[STEP10] Pushing to Feishu ({len(text)} chars)...")
     success = push_to_feishu(text)
     sys.exit(0 if success else 1)
 
