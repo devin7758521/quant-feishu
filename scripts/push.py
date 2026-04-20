@@ -21,17 +21,9 @@ PUSH_TYPE       = os.environ.get("PUSH_TYPE", "morning")  # morning/open/midday/
 SCRAPLING_MODE  = os.environ.get("SCRAPLING_MODE", "basic")  # basic / stealth
 
 # ─── AI 配置：三API降级轮换 ──────────────────────────────────────────────────
-# 优先级: deepseek → gemini1 → gemini2
+# 优先级: gemini → gemini2 → deepseek
 # 轮换: 每次调用自动切换到下一个可用API，失败则降级
 AI_PROVIDERS = []
-_ds_key = os.environ.get("DEEPSEEK_API_KEY", "")
-if _ds_key:
-    AI_PROVIDERS.append({
-        "name": "deepseek",
-        "api_key": _ds_key,
-        "base_url": os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com"),
-        "model": os.environ.get("DEEPSEEK_MODEL", "deepseek-chat"),
-    })
 _g1_key = os.environ.get("GEMINI_API_KEY", "")
 if _g1_key:
     AI_PROVIDERS.append({
@@ -45,6 +37,14 @@ if _g2_key:
         "name": "gemini2",
         "api_key": _g2_key,
         "model": os.environ.get("GEMINI_MODEL_2", "gemini-2.0-flash"),
+    })
+_ds_key = os.environ.get("DEEPSEEK_API_KEY", "")
+if _ds_key:
+    AI_PROVIDERS.append({
+        "name": "deepseek",
+        "api_key": _ds_key,
+        "base_url": os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com"),
+        "model": os.environ.get("DEEPSEEK_MODEL", "deepseek-chat"),
     })
 
 # 兼容旧环境变量
