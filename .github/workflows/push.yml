@@ -71,10 +71,7 @@ jobs:
           LONGPORT_APP_SECRET:   ${{ secrets.LONGPORT_APP_SECRET }}
           LONGPORT_ACCESS_TOKEN: ${{ secrets.LONGPORT_ACCESS_TOKEN }}
           DEEPSEEK_API_KEY:      ${{ secrets.DEEPSEEK_API_KEY }}
-          DEEPSEEK_BASE_URL:     ${{ secrets.DEEPSEEK_BASE_URL }}
-          DEEPSEEK_MODEL:        ${{ secrets.DEEPSEEK_MODEL }}
           GEMINI_API_KEY:        ${{ secrets.GEMINI_API_KEY }}
-          GEMINI_MODEL:          ${{ secrets.GEMINI_MODEL }}
           GEMINI_API_KEY_2:      ${{ secrets.GEMINI_API_KEY_2 }}
           GEMINI_MODEL_2:        ${{ secrets.GEMINI_MODEL_2 }}
           SCRAPLING_MODE:        ${{ secrets.SCRAPLING_MODE }}

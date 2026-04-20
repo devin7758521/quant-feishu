@@ -24,27 +24,32 @@ SCRAPLING_MODE  = os.environ.get("SCRAPLING_MODE", "basic")  # basic / stealth
 # 优先级: gemini → gemini2 → deepseek
 # 轮换: 每次调用自动切换到下一个可用API，失败则降级
 AI_PROVIDERS = []
+def _env(key, default=""):
+    """获取环境变量，空字符串也回退到默认值"""
+    val = os.environ.get(key, "")
+    return val if val else default
+
 _g1_key = os.environ.get("GEMINI_API_KEY", "")
 if _g1_key:
     AI_PROVIDERS.append({
         "name": "gemini",
         "api_key": _g1_key,
-        "model": os.environ.get("GEMINI_MODEL", "gemini-2.0-flash"),
+        "model": _env("GEMINI_MODEL", "gemini-2.0-flash"),
     })
 _g2_key = os.environ.get("GEMINI_API_KEY_2", "")
 if _g2_key:
     AI_PROVIDERS.append({
         "name": "gemini2",
         "api_key": _g2_key,
-        "model": os.environ.get("GEMINI_MODEL_2", "gemini-2.0-flash"),
+        "model": _env("GEMINI_MODEL_2", "gemini-2.0-flash"),
     })
 _ds_key = os.environ.get("DEEPSEEK_API_KEY", "")
 if _ds_key:
     AI_PROVIDERS.append({
         "name": "deepseek",
         "api_key": _ds_key,
-        "base_url": os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com"),
-        "model": os.environ.get("DEEPSEEK_MODEL", "deepseek-chat"),
+        "base_url": _env("DEEPSEEK_BASE_URL", "https://api.deepseek.com"),
+        "model": _env("DEEPSEEK_MODEL", "deepseek-chat"),
     })
 
 # 兼容旧环境变量
@@ -1131,11 +1136,10 @@ def _do_ai_call(provider, prompt, json_mode=False):
 def _call_openai_compat(provider, prompt, json_mode=False):
     """OpenAI 兼容格式 API（DeepSeek 等）"""
     url = f"{provider['base_url']}/chat/completions"
-    headers = {"Authorization": f"Bearer {provider['api_key'][:8]}...", "Content-Type": "application/json"}
     payload = {
         "model": provider["model"],
         "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": 1500,
+        "max_tokens": 4096,
         "temperature": 0.7,
     }
     if json_mode:
@@ -1153,17 +1157,15 @@ def _call_openai_compat(provider, prompt, json_mode=False):
 def _call_gemini(provider, prompt, json_mode=False):
     """Google Gemini API（参照官方 google-generativeai SDK 逻辑，用 REST 调用）"""
     model = provider["model"]
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={provider['api_key'][:8]}..."
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={provider['api_key']}"
     payload = {
         "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {"maxOutputTokens": 1500, "temperature": 0.7},
+        "generationConfig": {"maxOutputTokens": 4096, "temperature": 0.7},
     }
     if json_mode:
         payload["generationConfig"]["responseMimeType"] = "application/json"
     print(f"[AI] POST generativelanguage.googleapis.com model={model} json_mode={json_mode}")
-    r = requests.post(
-        f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={provider['api_key']}",
-        json=payload, timeout=90)
+    r = requests.post(url, json=payload, timeout=90)
     print(f"[AI] Response: status={r.status_code}, len={len(r.text)}")
     r.raise_for_status()
     data = r.json()
@@ -1200,23 +1202,34 @@ JSON 结构必须严格如下：
         print(f"[AI] {ticker} reasoning: ai_call returned None")
         return {"rating": 0, "reason": "AI调用失败"}
 
+    # 尝试多种方式解析 JSON
+    import re
+    # 1) 直接解析
     try:
         parsed = json.loads(result)
         print(f"[AI] {ticker} reasoning parsed OK: rating={parsed.get('rating')}")
         return parsed
     except json.JSONDecodeError:
-        # 尝试提取 JSON 片段
-        import re
-        m = re.search(r'\{[^{}]*"rating"[^{}]*\}', result, re.DOTALL)
-        if m:
-            try:
-                parsed = json.loads(m.group())
-                print(f"[AI] {ticker} reasoning extracted OK: rating={parsed.get('rating')}")
-                return parsed
-            except json.JSONDecodeError:
-                pass
-        print(f"[AI] {ticker} output not valid JSON: {result[:150]}")
-        return {"rating": 0, "reason": "AI输出格式错误"}
+        pass
+    # 2) 提取 ```json ... ``` 代码块
+    m = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', result, re.DOTALL)
+    if m:
+        try:
+            parsed = json.loads(m.group(1))
+            print(f"[AI] {ticker} reasoning code-block extracted OK: rating={parsed.get('rating')}")
+            return parsed
+        except json.JSONDecodeError:
+            pass
+    # 3) 提取含 "rating" 的最外层花括号内容（允许 reason 值含引号/截断）
+    m = re.search(r'\{"rating"\s*:\s*(\d)', result)
+    if m:
+        rating = int(m.group(1))
+        rm = re.search(r'"reason"\s*:\s*"(.+?)"', result, re.DOTALL)
+        reason = rm.group(1)[:100] if rm else "推理提取成功"
+        print(f"[AI] {ticker} reasoning regex extracted: rating={rating}")
+        return {"rating": rating, "reason": reason}
+    print(f"[AI] {ticker} output not valid JSON: {result[:200]}")
+    return {"rating": 0, "reason": "AI输出格式错误"}
 
 
 def batch_stock_reasoning(scored_stocks, stock_news):
