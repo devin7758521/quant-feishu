@@ -503,8 +503,8 @@ SCRAPLING_NEWS_SOURCES = [
 ]
 
 def scrapling_news(tickers, min_total=20):
-    """Scrapling 深度抓取 TOP10 个股全网新闻、公告、机构评论
-    去重过滤无效内容，每个 ticker 目标 ≥2 条，总计 ≥20 条
+    """Scrapling 深度抓取 TOP3 个股全网新闻、公告、机构评论
+    去重过滤无效内容，每个 ticker 目标 ≥3 条，总计 ≥10 条
     fallback: Finnhub company-news
     
     官方文档: https://scrapling.readthedocs.io/
@@ -1335,7 +1335,7 @@ def stock_reasoning(ticker, stock_data, news_list):
 
 
 def batch_stock_reasoning(scored_stocks, stock_news):
-    """批量个股推理：TOP10 逐只调用 AI 新闻汇总分析
+    """批量个股推理：TOP3 逐只调用 AI 新闻汇总分析
     返回: dict {ticker: {"rating": int, "reason": str}}
     """
     if not AI_PROVIDERS:
@@ -1349,9 +1349,9 @@ def batch_stock_reasoning(scored_stocks, stock_news):
         news_by_ticker.setdefault(t, []).append(n["headline"])
 
     results = {}
-    top10 = scored_stocks[:10]
-    print(f"[AI] Starting batch stock reasoning for {len(top10)} stocks...")
-    for i, s in enumerate(top10):
+    top3 = scored_stocks[:3]
+    print(f"[AI] Starting batch stock reasoning for {len(top3)} stocks...")
+    for i, s in enumerate(top3):
         ticker = s["ticker"]
         # 组装盘面数据
         pe_str = f"PE={s.get('pe')}" if s.get("pe") else "PE=N/A"
@@ -1364,7 +1364,7 @@ def batch_stock_reasoning(scored_stocks, stock_news):
         headlines = news_by_ticker.get(ticker, [])
         news_str = "\n".join([f"- {h}" for h in headlines[:5]]) if headlines else "暂无相关新闻"
 
-        print(f"[AI] Reasoning [{i+1}/10] {ticker} (news={len(headlines)})...")
+        print(f"[AI] Reasoning [{i+1}/{len(top3)}] {ticker} (news={len(headlines)})...")
         result = stock_reasoning(ticker, stock_data, news_str)
         results[ticker] = result
         print(f"[AI] {ticker} => rating={result.get('rating','-')}, action={result.get('action','-')}, reason={result.get('reason','')[:60]}")
@@ -1386,14 +1386,14 @@ def ai_analyze(vix_data, scored_stocks, stock_news, macro_news,
 
     vix = vix_data["price"]
     regime = get_vix_regime(vix)
-    top10 = scored_stocks[:10]
+    top3 = scored_stocks[:3]
 
     # ── 构建上下文 ──
     ctx = f"## 市场环境\nVIX={vix:.1f}({regime['label']},模式:{regime['mode']}) 涨跌{vix_data['change']:+.1f}%\n\n"
 
-    # TOP10 评分 + AI评级
-    ctx += "## TOP10评分\n"
-    for i, s in enumerate(top10):
+    # TOP3 评分 + AI评级
+    ctx += "## TOP3评分\n"
+    for i, s in enumerate(top3):
         pe_str = f"PE={s.get('pe')}" if s.get("pe") else "PE=N/A"
         ai_r = stock_reasonings.get(s["ticker"], {}) if stock_reasonings else {}
         rating_str = f" AI评级:{ai_r.get('rating','-')}星" if ai_r.get("rating") else ""
@@ -1410,7 +1410,7 @@ def ai_analyze(vix_data, scored_stocks, stock_news, macro_news,
         for n in stock_news:
             t = n.get("ticker", "")
             by_ticker.setdefault(t, []).append(n["headline"])
-        for ticker in [s["ticker"] for s in top10]:
+        for ticker in [s["ticker"] for s in top3]:
             if ticker in by_ticker:
                 ctx += f"【{ticker}】" + " | ".join(by_ticker[ticker][:3]) + "\n"
 
@@ -1464,7 +1464,7 @@ def ai_analyze(vix_data, scored_stocks, stock_news, macro_news,
 
 请输出以下结构化内容：
 
-**1. 简讯**：用3-5句话概括今日TOP10个股的核心动态，不要罗列，要提炼因果逻辑
+**1. 简讯**：用3-5句话概括今日TOP3个股的核心动态，不要罗列，要提炼因果逻辑
 
 **2. 情绪判断**：整体市场情绪为 [利好/中性/利空/避险]，逐票给出情绪方向和关键依据（新闻事件+数据信号）。严格执行红线铁律。
 
@@ -1514,7 +1514,7 @@ def build_feishu_text(vix_data, scored_stocks, push_type, stock_news=None, macro
     regime  = get_vix_regime(vix)
     w       = get_weights(vix)
 
-    top10   = scored_stocks[:10]
+    top3    = scored_stocks[:3]
     movers  = [s for s in scored_stocks if abs(s["change_pct"]) > 3]
 
     lines = []
@@ -1530,9 +1530,9 @@ def build_feishu_text(vix_data, scored_stocks, push_type, stock_news=None, macro
     lines.append(f"当前权重 · {w_str}")
     lines.append("")
 
-    # TOP10
-    lines.append("📊 综合评分 TOP10")
-    for i, s in enumerate(top10):
+    # TOP3
+    lines.append("📊 综合评分 TOP3")
+    for i, s in enumerate(top3):
         chg = s["change_pct"]
         chg_str = f"+{chg:.1f}%" if chg >= 0 else f"{chg:.1f}%"
         chg_icon = "📈" if chg >= 0 else "📉"
@@ -1625,7 +1625,7 @@ def build_feishu_text(vix_data, scored_stocks, push_type, stock_news=None, macro
         for n in stock_news:
             t = n.get("ticker", "")
             by_ticker.setdefault(t, []).append(n)
-        for ticker in [s["ticker"] for s in scored_stocks[:10]]:
+        for ticker in [s["ticker"] for s in scored_stocks[:3]]:
             if ticker in by_ticker:
                 for n in by_ticker[ticker][:3]:
                     lines.append(f"  · [{ticker}] [{n.get('source','')}] {n['headline']}")
@@ -1748,14 +1748,14 @@ def main():
         sys.exit(1)
     print(f"Scored {len(scored)} stocks, top: {scored[0]['ticker']} ({scored[0]['score']})")
 
-    # 4. Scrapling 深度抓取个股新闻（TOP10，≥20条）
-    top10_tickers = [s["ticker"] for s in scored[:10]]
-    stock_news = scrapling_news(top10_tickers, min_total=20)
+    # 4. Scrapling 深度抓取个股新闻（TOP3，≥10条）
+    top3_tickers = [s["ticker"] for s in scored[:3]]
+    stock_news = scrapling_news(top3_tickers, min_total=10)
 
     # 5. 拉宏观新闻
     macro_news = fetch_news(vix)
 
-    # 6. 先执行 AI 个股新闻推理（TOP10逐只）→ 7. 再做期权分析（传入AI审判结果）
+    # 6. 先执行 AI 个股新闻推理（TOP3逐只）→ 7. 再做期权分析（传入AI审判结果）
     print(f"[STEP6] Starting AI stock reasoning...")
     stock_reasonings = batch_stock_reasoning(scored, stock_news)
 
