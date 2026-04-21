@@ -1174,35 +1174,8 @@ def _call_gemini(provider, prompt, json_mode=False):
     return content
 
 
-def stock_reasoning(ticker, stock_data, news_list):
-    """个股新闻汇总与逻辑推理（参照 stock_reasoning_skill）
-    输入: ticker, 盘面数据str, 新闻列表
-    输出: {"rating": 0-5, "reason": "推理逻辑"}
-    """
-    prompt = f"""你是一位拥有顶级投行经验的资深量化分析师和基本面研究员。
-
-【输入数据】
-- 目标股票：{ticker}
-- 近期盘面/关键数据：{stock_data}
-- 近期相关新闻：{news_list}
-
-【任务与推理链】
-请在后台静默执行以下思考：
-1. 降噪：剔除公关废话，提取2-3个对基本面有实质影响的核心事件。
-2. 驱动力分析：评估核心事件对短期情绪和中长期盈利的利弊。
-3. 预期差推演：对比新闻事件的利好/利空是否已反映在盘面数据中？大众的第一反应是否有误判？
-
-【输出要求】
-你必须且只能输出一个有效的 JSON 对象，不要包含任何 Markdown 标记或额外的解释文字。
-JSON 结构必须严格如下：
-{{"rating": <0到5之间的整数>, "reason": "<50-100字的简短段落，一针见血地说明给出该评级的核心推理逻辑。直接切入要害。>"}}"""
-
-    result = ai_call(prompt, json_mode=True)
-    if not result:
-        print(f"[AI] {ticker} reasoning: ai_call returned None")
-        return {"rating": 0, "reason": "AI调用失败"}
-
-    # 尝试多种方式解析 JSON
+def _parse_ai_json(ticker, result):
+    """多级 JSON 解析：直接→代码块→正则提取 rating+action+reason"""
     import re
     # 1) 直接解析
     try:
@@ -1220,16 +1193,59 @@ JSON 结构必须严格如下：
             return parsed
         except json.JSONDecodeError:
             pass
-    # 3) 提取含 "rating" 的最外层花括号内容（允许 reason 值含引号/截断）
-    m = re.search(r'\{"rating"\s*:\s*(\d)', result)
-    if m:
-        rating = int(m.group(1))
-        rm = re.search(r'"reason"\s*:\s*"(.+?)"', result, re.DOTALL)
-        reason = rm.group(1)[:100] if rm else "推理提取成功"
-        print(f"[AI] {ticker} reasoning regex extracted: rating={rating}")
-        return {"rating": rating, "reason": reason}
+    # 3) 正则逐字段提取（允许截断）
+    parsed = {}
+    m_rating = re.search(r'"rating"\s*:\s*(\d)', result)
+    if m_rating:
+        parsed["rating"] = int(m_rating.group(1))
+    m_action = re.search(r'"action"\s*:\s*"([^"]+)"', result)
+    if m_action:
+        parsed["action"] = m_action.group(1)
+    m_reason = re.search(r'"reason"\s*:\s*"(.+?)"', result, re.DOTALL)
+    if m_reason:
+        parsed["reason"] = m_reason.group(1)[:100]
+    if parsed.get("rating") is not None:
+        parsed.setdefault("action", "确认量化信号")
+        parsed.setdefault("reason", "推理提取成功")
+        print(f"[AI] {ticker} reasoning regex extracted: rating={parsed['rating']}, action={parsed['action']}")
+        return parsed
     print(f"[AI] {ticker} output not valid JSON: {result[:200]}")
-    return {"rating": 0, "reason": "AI输出格式错误"}
+    return {"rating": 0, "action": "确认量化信号", "reason": "AI输出格式错误"}
+
+VALID_ACTIONS = {"确认量化信号", "降级为观望", "反转为反向操作"}
+
+def stock_reasoning(ticker, stock_data, news_list):
+    """个股 AI 审判官：结合量化得分与实时舆情进行决策修正
+    输入: ticker, 盘面数据str, 新闻列表
+    输出: {"rating": 0-5, "action": str, "reason": str}
+    action: '确认量化信号' / '降级为观望' / '反转为反向操作'
+    """
+    prompt = f"""你是一位拥有顶级投行经验的资深量化分析师和基本面研究员。当前量化系统给出了机器评分，你需要结合新闻基本面进行人工复核。
+
+【输入数据】
+- 目标股票：{ticker}
+- 量化初步判断：{stock_data}
+- 近期相关新闻：{news_list}
+
+【任务与推理链】
+1. 降噪提取：从新闻中剥离无效信息，提取对基本面/估值有实质影响的核心事件。
+2. 预期差推演：评估新闻利好/利空是否已反映在当前股价或量化评分中。
+3. 信号审判：若新闻存在致命风险（如集体诉讼、财报暴雷、重大会计质疑），你必须果断否决量化系统的高分信号。
+
+【输出要求】
+必须且只能输出一个有效的 JSON 对象，不得包含 Markdown 标记。格式如下：
+{{"rating": <0到5之间的整数>, "action": "<必须是以下三个词之一：'确认量化信号' 或 '降级为观望' 或 '反转为反向操作'>", "reason": "<50-100字。若选择'降级'或'反转'，须精准说明量化系统忽略的致命风险。>"}}"""
+
+    result = ai_call(prompt, json_mode=True)
+    if not result:
+        print(f"[AI] {ticker} reasoning: ai_call returned None")
+        return {"rating": 0, "action": "确认量化信号", "reason": "AI调用失败"}
+
+    parsed = _parse_ai_json(ticker, result)
+    # 校验 action 合法性
+    if parsed.get("action") not in VALID_ACTIONS:
+        parsed["action"] = "确认量化信号"
+    return parsed
 
 
 def batch_stock_reasoning(scored_stocks, stock_news):
@@ -1265,7 +1281,7 @@ def batch_stock_reasoning(scored_stocks, stock_news):
         print(f"[AI] Reasoning [{i+1}/10] {ticker} (news={len(headlines)})...")
         result = stock_reasoning(ticker, stock_data, news_str)
         results[ticker] = result
-        print(f"[AI] {ticker} => rating={result.get('rating','-')}, reason={result.get('reason','')[:60]}")
+        print(f"[AI] {ticker} => rating={result.get('rating','-')}, action={result.get('action','-')}, reason={result.get('reason','')[:60]}")
         time.sleep(0.5)  # 避免触发限流
 
     print(f"[AI] Stock reasoning done: {len(results)} stocks")
@@ -1345,20 +1361,32 @@ def ai_analyze(vix_data, scored_stocks, stock_news, macro_news,
                     ctx += f"\n  · {u['type'].upper()} ${u['strike']} Vol={u['volume']} OI={u['oi']} V/O={u['vol_oi_ratio']}x 意图:{u['intent']}"
             ctx += "\n"
 
+    # ── VIX 涨幅判断 ──
+    vix_chg = vix_data.get("change", 0)
+    vix_spike = vix_chg > 5
+
     # ── Prompt ──
     prompt = f"""{ctx}
 
-你是资深美股量化+期权策略师。基于以上所有数据（行情+个股AI推理+Scrapling深度新闻+期权链），进行深度推理，输出以下结构化结果：
+你是资深美股量化+期权策略师。基于以上所有数据（行情+个股AI推理+Scrapling深度新闻+期权链），进行深度推理。
+
+{"⚠️【🔴 宏观红线触发】VIX单日涨幅超过5%（当前+" + f"{vix_chg:.1f}" + "%），系统进入避险模式！" if vix_spike else ""}
+
+【🔴 宏观红线铁律 (最高优先级)】
+1. 情绪熔断：若 VIX 单日涨幅超过 5%，或宏观新闻涉及战争、局部冲突、重大自然灾害，【情绪判断】严禁给出"利好"，最高只能是"避险"。
+2. 策略约束：在避险/防守环境下，【期权交易建议】禁止推荐纯多头买方策略（如裸买 Call）。
+
+请输出以下结构化内容：
 
 **1. 简讯**：用3-5句话概括今日TOP10个股的核心动态，不要罗列，要提炼因果逻辑
 
-**2. 情绪判断**：整体市场情绪为 [利好/中性/利空]，逐票给出情绪方向和关键依据（新闻事件+数据信号）
+**2. 情绪判断**：整体市场情绪为 [利好/中性/利空/避险]，逐票给出情绪方向和关键依据（新闻事件+数据信号）。严格执行红线铁律。
 
 **3. 核心事件**：列出3-5个最重要的事件驱动，标注影响的ticker和方向
 
-**4. 风险提示**：当前最需要警惕的2-3个风险（事件风险、流动性风险、IV风险、反向逻辑）
+**4. 风险提示**：当前最需警惕的2-3个风险。地缘政治风险必须置顶。
 
-**5. 期权交易建议**：结合期权链分析，给出1-2个最值得执行的期权策略，说明理由、合约选择、风控要点
+**5. 期权交易建议**：结合期权链与 VIX 环境，给出1-2个最值得执行的期权策略，说明理由、合约选择、风控要点。严禁空话，必须给出具体的风控要点。避险环境下禁止推荐裸买Call。
 
 中文回答，简洁有力，直接给结论和依据，不要空话套话。"""
 
@@ -1422,16 +1450,29 @@ def build_feishu_text(vix_data, scored_stocks, push_type, stock_news=None, macro
         chg = s["change_pct"]
         chg_str = f"+{chg:.1f}%" if chg >= 0 else f"{chg:.1f}%"
         chg_icon = "📈" if chg >= 0 else "📉"
-        # AI 评级
+        # AI 评级与审判
         ai_r = stock_reasonings.get(s["ticker"], {}) if stock_reasonings else {}
+        ai_action = ai_r.get("action", "确认量化信号")
         ai_stars = f" ⭐{ai_r.get('rating','-')}" if ai_r.get("rating") else ""
+        # 根据 action 调整信号图标
+        if ai_action == "反转为反向操作":
+            signal_icon = "⛔"
+            signal_text = "AI反转"
+        elif ai_action == "降级为观望":
+            signal_icon = "⚠️"
+            signal_text = "AI降级"
+        else:
+            signal_icon = "✅" if s["signal"] == "买入" else ("➖" if s["signal"] == "中性" else "❌")
+            signal_text = s["signal"]
         lines.append(
-            f"  {i+1}. {s['ticker']} {s['signal']}  "
+            f"  {i+1}. {s['ticker']} {signal_text} {signal_icon}  "
             f"评分{s['score']}  {chg_icon}{chg_str}{ai_stars}  "
             f"💡{s['option_strategy']}  📦{s['position']}"
         )
         if ai_r.get("reason"):
             lines.append(f"     AI: {ai_r['reason']}")
+        if ai_action != "确认量化信号":
+            lines.append(f"     ⚖️ AI审判: {ai_action}")
     lines.append("")
 
     # 异动股
@@ -1447,12 +1488,15 @@ def build_feishu_text(vix_data, scored_stocks, push_type, stock_news=None, macro
         lines.append("")
 
     # 期权提示
+    vix_chg = vix_data.get("change", 0)
     if vix >= 35:
-        lines.append("⚠️ VIX>35，建议暂停期权买方，以卖方策略或空仓为主")
+        lines.append("🔴 VIX>35，极度恐慌！暂停期权买方，以卖方策略或空仓为主")
     elif vix >= 25:
         lines.append("🎯 VIX>25，IV偏高，卖方策略（CSP/Iron Condor）占优")
     else:
         lines.append("✅ VIX<25，IV偏低，买方策略（Long Call/Spread）成本合理")
+    if vix_chg > 5:
+        lines.append(f"🔴 宏观红线触发！VIX单日+{vix_chg:.1f}%，系统进入避险模式，禁止裸买Call")
     lines.append("")
 
     # 强买信号
