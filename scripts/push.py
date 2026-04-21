@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # scripts/push.py
-# 拉取实时行情 + VIX → 计算量化评分 → Scrapling深度新闻 → 长桥期权分析 → AI个股推理+宏观推理 → 推送飞书
-# 数据源: Twelve Data (主) + Finnhub (补缺) + Yahoo/FRED VIX + Scrapling + LongPort
+# 拉取实时行情 + VIX → 计算量化评分 → Scrapling深度新闻 → 期权分析(LongPort/Yahoo/TD) → AI个股推理+宏观推理 → 推送飞书
+# 数据源: Twelve Data (主) + Finnhub (补缺) + Yahoo/FRED VIX + Scrapling + LongPort/Yahoo Options
 
 import os
 import sys
@@ -815,6 +815,72 @@ def fetch_twelvedata_options(ticker):
         print(f"Twelve Data options failed for {ticker}: {e}")
         return []
 
+
+def fetch_yahoo_options(ticker):
+    """Yahoo Finance 免费期权链数据（无需 API key）
+    使用 Yahoo v8 API 获取完整期权链，含 bid/ask/volume/oi/iv
+    数据优先级: LongPort(会员) → Yahoo(免费真实) → Twelve Data → 估算
+    """
+    try:
+        # 1) 获取到期日列表
+        url = f"https://query1.finance.yahoo.com/v7/finance/options/{ticker}"
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+        r = requests.get(url, headers=headers, timeout=15)
+        data = r.json()
+        result = data.get("optionChain", {}).get("result", [])
+        if not result:
+            print(f"Yahoo options for {ticker}: no data returned")
+            return []
+
+        chain = result[0]
+        expiries = chain.get("expirationDates", [])[:3]  # 取最近3个到期日
+        if not expiries:
+            return []
+
+        all_contracts = []
+        for exp_ts in expiries:
+            # 2) 按到期日获取期权链
+            url_exp = f"https://query1.finance.yahoo.com/v7/finance/options/{ticker}?date={exp_ts}"
+            r2 = requests.get(url_exp, headers=headers, timeout=15)
+            data2 = r2.json()
+            opts = data2.get("optionChain", {}).get("result", [])
+            if not opts:
+                continue
+
+            calls = opts[0].get("options", [{}])[0].get("calls", [])
+            puts = opts[0].get("options", [{}])[0].get("puts", [])
+            exp_str = datetime.fromtimestamp(exp_ts, tz=timezone.utc).strftime("%Y-%m-%d")
+
+            for otype, opt_list in [("call", calls), ("put", puts)]:
+                for opt in opt_list[:20]:  # 每个方向最多20个
+                    try:
+                        # 过滤非标准期权（weeklies等奇怪的后缀）
+                        if opt.get("contractSymbol", "").count(".") > 1:
+                            continue
+                        all_contracts.append({
+                            "strike": float(opt.get("strike", 0)),
+                            "expiry": exp_str,
+                            "type": otype,
+                            "bid": float(opt.get("bid", 0)),
+                            "ask": float(opt.get("ask", 0)),
+                            "last_done": float(opt.get("lastPrice", 0)),
+                            "iv": float(opt.get("impliedVolatility", 0)) * 100 if opt.get("impliedVolatility") else 0,
+                            "delta": float(opt.get("delta", 0)) if opt.get("delta") else 0,
+                            "gamma": 0, "theta": 0, "vega": 0,
+                            "volume": int(opt.get("volume", 0)),
+                            "oi": int(opt.get("openInterest", 0)),
+                        })
+                    except Exception:
+                        continue
+            time.sleep(0.15)  # 避免限流
+
+        print(f"Yahoo options for {ticker}: {len(all_contracts)} contracts from {len(expiries)} expiries")
+        return all_contracts
+
+    except Exception as e:
+        print(f"Yahoo options failed for {ticker}: {e}")
+        return []
+
 def _detect_unusual_activity(contracts, price):
     """检测期权成交量异动（Unusual Options Activity）
     核心逻辑:
@@ -895,10 +961,19 @@ def option_analysis(ticker, price, score, vix):
     返回: dict with strategy, direction, contracts, breakeven, max_loss, 
           take_profit, risk_reward, unusual_activity, signal_shift
     """
-    # 1. 拉取期权链数据
+    # 1. 拉取期权链数据（优先级: LongPort → Yahoo → Twelve Data）
+    data_source = "估算值"
     contracts = fetch_option_chain_deep(ticker)
-    if not contracts:
-        contracts = fetch_twelvedata_options(ticker)
+    if contracts:
+        data_source = "LongPort真实数据"
+    else:
+        contracts = fetch_yahoo_options(ticker)
+        if contracts:
+            data_source = "Yahoo真实数据"
+        else:
+            contracts = fetch_twelvedata_options(ticker)
+            if contracts:
+                data_source = "TwelveData"
 
     # 2. 检测期权成交量异动
     unusual = _detect_unusual_activity(contracts, price)
@@ -934,7 +1009,8 @@ def option_analysis(ticker, price, score, vix):
     # 6. 综合推荐策略
     result = {
         "ticker": ticker, "direction": direction, "price": price,
-        "real_data": bool(liquid), "unusual_activity": unusual,
+        "real_data": bool(liquid), "data_source": data_source,
+        "unusual_activity": unusual,
         "signal_shift": signal_shift,
     }
 
@@ -1578,7 +1654,7 @@ def build_feishu_text(vix_data, scored_stocks, push_type, stock_news=None, macro
                 lines.append(f"    止盈区间: {oa['take_profit']}")
             if oa.get("risk_reward"):
                 lines.append(f"    风险收益比: {oa['risk_reward']}")
-            data_src = "LongPort真实数据" if oa.get("real_data") else "估算值"
+            data_src = oa.get("data_source", "LongPort真实数据" if oa.get("real_data") else "估算值")
             lines.append(f"    数据源: {data_src}")
         lines.append("")
 
