@@ -86,10 +86,11 @@ def is_market_holiday():
     today_et = datetime.now(et).strftime("%Y-%m-%d")
     return today_et in NYSE_HOLIDAYS
 
-# ─── 股票池（52只，含2指数）────────────────────────────────────────────────────
+# ─── 股票池（30只，含2指数ETF）─────────────────────────────────────────────────
+# 七姐妹(Magnificent 7): AAPL, MSFT, NVDA, AMZN, META, GOOGL, TSLA 必选
 
 UNIVERSE = [
-    # NASDAQ 20
+    # ★ 七姐妹 Magnificent 7（必选）
     {"ticker": "AAPL",  "name": "Apple",              "index": "NASDAQ", "sector": "Tech"},
     {"ticker": "MSFT",  "name": "Microsoft",          "index": "NASDAQ", "sector": "Tech"},
     {"ticker": "NVDA",  "name": "NVIDIA",             "index": "NASDAQ", "sector": "Semis"},
@@ -97,50 +98,37 @@ UNIVERSE = [
     {"ticker": "META",  "name": "Meta",               "index": "NASDAQ", "sector": "Tech"},
     {"ticker": "GOOGL", "name": "Alphabet",           "index": "NASDAQ", "sector": "Tech"},
     {"ticker": "TSLA",  "name": "Tesla",              "index": "NASDAQ", "sector": "EV/Auto"},
+    # 半导体
     {"ticker": "AVGO",  "name": "Broadcom",           "index": "NASDAQ", "sector": "Semis"},
-    {"ticker": "COST",  "name": "Costco",             "index": "NASDAQ", "sector": "Retail"},
-    {"ticker": "NFLX",  "name": "Netflix",            "index": "NASDAQ", "sector": "Media"},
     {"ticker": "AMD",   "name": "AMD",                "index": "NASDAQ", "sector": "Semis"},
-    {"ticker": "QCOM",  "name": "Qualcomm",           "index": "NASDAQ", "sector": "Semis"},
-    {"ticker": "ADBE",  "name": "Adobe",              "index": "NASDAQ", "sector": "SaaS"},
     {"ticker": "ASML",  "name": "ASML",               "index": "NASDAQ", "sector": "Semis"},
-    {"ticker": "PANW",  "name": "Palo Alto",          "index": "NASDAQ", "sector": "Cyber"},
-    {"ticker": "INTU",  "name": "Intuit",             "index": "NASDAQ", "sector": "SaaS"},
-    {"ticker": "NOW",   "name": "ServiceNow",         "index": "NASDAQ", "sector": "SaaS"},
-    {"ticker": "ISRG",  "name": "Intuitive Surgical", "index": "NASDAQ", "sector": "Health"},
-    {"ticker": "BKNG",  "name": "Booking",            "index": "NASDAQ", "sector": "Consumer"},
     {"ticker": "TXN",   "name": "Texas Instruments",  "index": "NASDAQ", "sector": "Semis"},
-    # S&P500 30
-    {"ticker": "BRK-B", "name": "Berkshire B",        "index": "S&P500", "sector": "Finance"},
-    {"ticker": "JPM",   "name": "JPMorgan",           "index": "S&P500", "sector": "Finance"},
-    {"ticker": "V",     "name": "Visa",               "index": "S&P500", "sector": "Finance"},
-    {"ticker": "XOM",   "name": "ExxonMobil",         "index": "S&P500", "sector": "Energy"},
-    {"ticker": "UNH",   "name": "UnitedHealth",       "index": "S&P500", "sector": "Health"},
-    {"ticker": "LLY",   "name": "Eli Lilly",          "index": "S&P500", "sector": "Pharma"},
-    {"ticker": "JNJ",   "name": "J&J",                "index": "S&P500", "sector": "Health"},
-    {"ticker": "MA",    "name": "Mastercard",         "index": "S&P500", "sector": "Finance"},
-    {"ticker": "PG",    "name": "P&G",                "index": "S&P500", "sector": "Consumer"},
-    {"ticker": "HD",    "name": "Home Depot",         "index": "S&P500", "sector": "Retail"},
-    {"ticker": "MRK",   "name": "Merck",              "index": "S&P500", "sector": "Pharma"},
-    {"ticker": "ABBV",  "name": "AbbVie",             "index": "S&P500", "sector": "Pharma"},
-    {"ticker": "CVX",   "name": "Chevron",            "index": "S&P500", "sector": "Energy"},
-    {"ticker": "KO",    "name": "Coca-Cola",          "index": "S&P500", "sector": "Consumer"},
-    {"ticker": "WMT",   "name": "Walmart",            "index": "S&P500", "sector": "Retail"},
-    {"ticker": "BAC",   "name": "Bank of America",    "index": "S&P500", "sector": "Finance"},
-    {"ticker": "TMO",   "name": "Thermo Fisher",      "index": "S&P500", "sector": "Health"},
-    {"ticker": "AMGN",  "name": "Amgen",              "index": "S&P500", "sector": "Pharma"},
-    {"ticker": "GS",    "name": "Goldman Sachs",      "index": "S&P500", "sector": "Finance"},
-    {"ticker": "CAT",   "name": "Caterpillar",        "index": "S&P500", "sector": "Industrial"},
-    {"ticker": "MS",    "name": "Morgan Stanley",     "index": "S&P500", "sector": "Finance"},
-    {"ticker": "RTX",   "name": "RTX Corp",           "index": "S&P500", "sector": "Defense"},
-    {"ticker": "UBER",  "name": "Uber",               "index": "S&P500", "sector": "Consumer"},
-    {"ticker": "GE",    "name": "GE Aerospace",       "index": "S&P500", "sector": "Industrial"},
+    # 科技/SaaS
+    {"ticker": "NFLX",  "name": "Netflix",            "index": "NASDAQ", "sector": "Media"},
+    {"ticker": "ADBE",  "name": "Adobe",              "index": "NASDAQ", "sector": "SaaS"},
     {"ticker": "CRM",   "name": "Salesforce",         "index": "S&P500", "sector": "SaaS"},
-    {"ticker": "ACN",   "name": "Accenture",          "index": "S&P500", "sector": "Tech"},
-    {"ticker": "IBM",   "name": "IBM",                "index": "S&P500", "sector": "Tech"},
-    {"ticker": "DHR",   "name": "Danaher",            "index": "S&P500", "sector": "Health"},
     {"ticker": "ORCL",  "name": "Oracle",             "index": "S&P500", "sector": "SaaS"},
+    # 金融
+    {"ticker": "JPM",   "name": "JPMorgan",           "index": "S&P500", "sector": "Finance"},
+    {"ticker": "BRK-B", "name": "Berkshire B",        "index": "S&P500", "sector": "Finance"},
+    {"ticker": "V",     "name": "Visa",               "index": "S&P500", "sector": "Finance"},
+    # 医药
+    {"ticker": "LLY",   "name": "Eli Lilly",          "index": "S&P500", "sector": "Pharma"},
+    {"ticker": "UNH",   "name": "UnitedHealth",       "index": "S&P500", "sector": "Health"},
+    # 消费/零售
+    {"ticker": "COST",  "name": "Costco",             "index": "NASDAQ", "sector": "Retail"},
+    {"ticker": "WMT",   "name": "Walmart",            "index": "S&P500", "sector": "Retail"},
     {"ticker": "PEP",   "name": "PepsiCo",            "index": "S&P500", "sector": "Consumer"},
+    # 能源
+    {"ticker": "XOM",   "name": "ExxonMobil",         "index": "S&P500", "sector": "Energy"},
+    {"ticker": "CVX",   "name": "Chevron",            "index": "S&P500", "sector": "Energy"},
+    # 工业/国防
+    {"ticker": "CAT",   "name": "Caterpillar",        "index": "S&P500", "sector": "Industrial"},
+    {"ticker": "RTX",   "name": "RTX Corp",           "index": "S&P500", "sector": "Defense"},
+    # 其他
+    {"ticker": "BKNG",  "name": "Booking",            "index": "NASDAQ", "sector": "Consumer"},
+    {"ticker": "UBER",  "name": "Uber",               "index": "S&P500", "sector": "Consumer"},
+    {"ticker": "HD",    "name": "Home Depot",          "index": "S&P500", "sector": "Retail"},
     # 指数ETF
     {"ticker": "QQQ",   "name": "Invesco QQQ (Nasdaq 100)", "index": "INDEX",  "sector": "Index"},
     {"ticker": "SPY",   "name": "SPDR S&P 500",             "index": "INDEX",  "sector": "Index"},
@@ -954,9 +942,9 @@ def _detect_unusual_activity(contracts, price):
     return unusual[:5]  # 最多5条
 
 
-def option_analysis(ticker, price, score, vix):
-    """深度期权分析：拉取期权链 → 检测异动 → 筛选流动性 → 推理策略 → 合约推荐
-    综合考虑: 量化评分方向 + 期权成交量异动 + IV水平 + VIX环境
+def option_analysis(ticker, price, score, vix, ai_action="确认量化信号"):
+    """深度期权分析：拉取期权链 → 检测异动 → AI一票否决 → 推荐合约
+    综合考虑: 量化评分方向 + AI审判 + 期权成交量异动 + IV水平 + VIX环境
     
     返回: dict with strategy, direction, contracts, breakeven, max_loss, 
           take_profit, risk_reward, unusual_activity, signal_shift
@@ -981,11 +969,18 @@ def option_analysis(ticker, price, score, vix):
     # 3. 基础方向（量化评分）
     base_direction = "bull" if score > 65 else "bear" if score < 42 else "neutral"
 
-    # 4. 异动修正方向：如果异动信号与评分方向一致则加强，否则标注冲突
+    # 🚨 4. AI 一票否决权介入
     direction = base_direction
     signal_shift = ""
+
+    if "降级" in ai_action or "观望" in ai_action:
+        direction = "neutral"
+        signal_shift = "⚠️ AI强制降级：存在基本面风险，取消多头期权推荐"
+    elif "反转" in ai_action or "反向" in ai_action:
+        direction = "bear"
+        signal_shift = "🚨 AI强制反转：存在致命利空，转为看跌策略"
+
     if unusual:
-        # 统计异动方向
         bull_signals = sum(1 for u in unusual if "看涨" in u["intent"])
         bear_signals = sum(1 for u in unusual if "看跌" in u["intent"])
         if bull_signals > bear_signals + 1:
@@ -995,9 +990,9 @@ def option_analysis(ticker, price, score, vix):
         else:
             unusual_direction = "neutral"
         
-        # 评分方向 vs 异动方向冲突时，标注但不强制覆盖
-        if unusual_direction != "neutral" and unusual_direction != base_direction:
-            signal_shift = f"⚠️评分={base_direction}但期权异动={unusual_direction}"
+        if unusual_direction != "neutral" and unusual_direction != direction:
+            shift_msg = f" | 另注: 系统看{direction}但期权异动看{unusual_direction}"
+            signal_shift = signal_shift + shift_msg if signal_shift else f"⚠️系统看{direction}但期权异动={unusual_direction}"
 
     # 5. 筛选高流动性合约 (volume + oi 排序)
     if contracts:
@@ -1119,10 +1114,8 @@ def option_analysis(ticker, price, score, vix):
 
 # ─── 兼容旧接口 ─────────────────────────────────────────────────────────────
 
-def build_option_picks(scored_stocks, vix):
-    """根据评分+VIX给出具体期权合约建议（前3只强买/买入股）
-    支持短/中/长三档期限，行权价规整为合法档位
-    """
+def build_option_picks(scored_stocks, vix, stock_reasonings=None):
+    """根据评分+VIX+AI审判给出具体期权合约建议"""
     buys = [s for s in scored_stocks if s["score"] > 58][:3]
     if not buys:
         return []
@@ -1131,6 +1124,23 @@ def build_option_picks(scored_stocks, vix):
         price = s["price"]
         ticker = s["ticker"]
         score = s["score"]
+
+        # 🚨 检查 AI 审判结果，执行强制拦截
+        if stock_reasonings:
+            ai_verdict = stock_reasonings.get(ticker, {})
+            ai_action = ai_verdict.get("action", "")
+            if any(word in ai_action for word in ("降级", "观望")):
+                # 降级为中性：只推荐保守策略
+                s_buy = round_strike(price * 0.97, "itm")
+                s_sell = round_strike(price * 1.03, "otm")
+                picks.append(f"{ticker} AI降级→Bull Call Spread 买${s_buy}/卖${s_sell} | 30-60天")
+                continue
+            elif any(word in ai_action for word in ("反转", "反向")):
+                # 反转为看跌
+                strike_put = round_strike(price * 0.98, "itm")
+                picks.append(f"{ticker} AI反转→买入Put ${strike_put}/30-45天")
+                continue
+
         direction = "bull" if score > 65 else "neutral"
 
         if direction == "bull":
@@ -1622,7 +1632,7 @@ def build_feishu_text(vix_data, scored_stocks, push_type, stock_news=None, macro
         lines.append("")
 
     # 期权合约建议（基础版）
-    option_picks = build_option_picks(scored_stocks, vix)
+    option_picks = build_option_picks(scored_stocks, vix, stock_reasonings)
     if option_picks:
         lines.append("🎯 期权合约建议")
         for p in option_picks:
@@ -1745,18 +1755,19 @@ def main():
     # 5. 拉宏观新闻
     macro_news = fetch_news(vix)
 
-    # 6. 期权深度分析（TOP3 买入股）
+    # 6. 先执行 AI 个股新闻推理（TOP10逐只）→ 7. 再做期权分析（传入AI审判结果）
+    print(f"[STEP6] Starting AI stock reasoning...")
+    stock_reasonings = batch_stock_reasoning(scored, stock_news)
+
     top_buys = [s for s in scored if s["score"] > 58][:3]
-    print(f"[STEP6] Option analysis: {len(top_buys)} buy candidates ({[s['ticker'] for s in top_buys]})")
+    print(f"[STEP7] Option analysis with AI Veto: {len(top_buys)} buy candidates ({[s['ticker'] for s in top_buys]})")
     option_analyses = []
     for s in top_buys:
-        oa = option_analysis(s["ticker"], s["price"], s["score"], vix)
+        ai_verdict = stock_reasonings.get(s["ticker"], {})
+        ai_action = ai_verdict.get("action", "确认量化信号")
+        oa = option_analysis(s["ticker"], s["price"], s["score"], vix, ai_action)
         option_analyses.append(oa)
-    print(f"[STEP6] Option analyses done: {len(option_analyses)} results")
-
-    # 7. AI 个股新闻推理（TOP10逐只）
-    print(f"[STEP7] Starting AI stock reasoning...")
-    stock_reasonings = batch_stock_reasoning(scored, stock_news)
+    print(f"[STEP7] Option analyses done: {len(option_analyses)} results")
 
     # 8. AI 宏观策略推理（整合个股推理+期权分析）
     print(f"[STEP8] Starting AI macro analysis...")
