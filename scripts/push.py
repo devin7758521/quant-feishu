@@ -1748,9 +1748,9 @@ def main():
         sys.exit(1)
     print(f"Scored {len(scored)} stocks, top: {scored[0]['ticker']} ({scored[0]['score']})")
 
-    # 4. Scrapling 深度抓取个股新闻（TOP3，≥10条）
+    # 4. Scrapling 深度抓取个股新闻（TOP3，≥15条）
     top3_tickers = [s["ticker"] for s in scored[:3]]
-    stock_news = scrapling_news(top3_tickers, min_total=10)
+    stock_news = scrapling_news(top3_tickers, min_total=15)
 
     # 5. 拉宏观新闻
     macro_news = fetch_news(vix)
