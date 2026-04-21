@@ -518,11 +518,9 @@ def scrapling_news(tickers, min_total=20):
     try:
         if SCRAPLING_MODE == "stealth":
             from scrapling.fetchers import StealthyFetcher
-            fetch = StealthyFetcher.fetch
             print("Scrapling mode: stealth (Playwright-based)")
         else:
             from scrapling.fetchers import Fetcher
-            fetch = Fetcher.fetch
             print("Scrapling mode: basic (HTTP)")
 
         for ticker in tickers:
@@ -535,9 +533,9 @@ def scrapling_news(tickers, min_total=20):
                 try:
                     url = url_tpl.format(ticker=ticker_lower, TICKER=ticker)
                     if SCRAPLING_MODE == "stealth":
-                        page = fetch(url, headless=True, network_idle=True, timeout=15)
+                        page = StealthyFetcher.fetch(url, headless=True, network_idle=True, timeout=15)
                     else:
-                        page = fetch(url, timeout=15)
+                        page = Fetcher.get(url)
                     titles = page.css(css_sel)
 
                     for el in titles[:3]:
