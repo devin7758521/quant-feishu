@@ -1767,7 +1767,13 @@ def main():
         ai_action = ai_verdict.get("action", "确认量化信号")
         oa = option_analysis(s["ticker"], s["price"], s["score"], vix, ai_action)
         option_analyses.append(oa)
-    print(f"[STEP7] Option analyses done: {len(option_analyses)} results")
+    # 汇总期权数据源分布
+    ds_counts = {}
+    for oa in option_analyses:
+        ds = oa.get("data_source", "估算值")
+        ds_counts[ds] = ds_counts.get(ds, 0) + 1
+    real_count = sum(oa.get("real_data", False) for oa in option_analyses)
+    print(f"[STEP7] Option analyses done: {len(option_analyses)} results | 真实数据:{real_count}/{len(option_analyses)} | 数据源分布:{ds_counts}")
 
     # 8. AI 宏观策略推理（整合个股推理+期权分析）
     print(f"[STEP8] Starting AI macro analysis...")
