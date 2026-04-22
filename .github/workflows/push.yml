@@ -2,10 +2,8 @@ name: Quant Alpha 飞书推送
 
 on:
   schedule:
-    - cron: '47 13 * * 1-5'   # 开盘预热 21:47 BJT
-    - cron: '47 14 * * 1-5'   # 开盘确认 22:47 BJT
-    - cron: '17 18 * * 1-5'   # 半场复盘 02:17 BJT
-    - cron: '47 21 * * 1-5'   # 收盘总结 05:47 BJT
+    - cron: '47 13 * * 1-5'   # 盘前预热 21:47 BJT
+    - cron: '47 21 * * 1-5'   # 盘后总结 05:47 BJT
   workflow_dispatch:
     inputs:
       push_type:
@@ -15,8 +13,6 @@ on:
         type: choice
         options:
           - morning
-          - open
-          - midday
           - close
 
 jobs:
@@ -53,10 +49,6 @@ jobs:
           HOUR=$(date -u +%H)
           if [ "$HOUR" = "13" ]; then
             echo "type=morning" >> $GITHUB_OUTPUT
-          elif [ "$HOUR" = "14" ]; then
-            echo "type=open" >> $GITHUB_OUTPUT
-          elif [ "$HOUR" = "18" ]; then
-            echo "type=midday" >> $GITHUB_OUTPUT
           else
             echo "type=close" >> $GITHUB_OUTPUT
           fi
@@ -75,4 +67,6 @@ jobs:
           GEMINI_API_KEY_2:      ${{ secrets.GEMINI_API_KEY_2 }}
           GEMINI_MODEL_2:        ${{ secrets.GEMINI_MODEL_2 }}
           SCRAPLING_MODE:        ${{ secrets.SCRAPLING_MODE }}
+          GIST_PAT:              ${{ secrets.GIST_PAT }}
+          GIST_ID:               ${{ secrets.GIST_ID }}
         run: python -u scripts/push.py

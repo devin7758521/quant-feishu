@@ -17,7 +17,7 @@ from datetime import datetime, timezone, timedelta
 FEISHU_WEBHOOK  = os.environ.get("FEISHU_WEBHOOK_URL", "")
 TWELVE_DATA_KEY = os.environ.get("TWELVE_DATA_API_KEY", "")
 FINNHUB_KEY     = os.environ.get("FINNHUB_API_KEY", "")
-PUSH_TYPE       = os.environ.get("PUSH_TYPE", "morning")  # morning/open/midday/close
+PUSH_TYPE       = os.environ.get("PUSH_TYPE", "morning")  # morning/close
 SCRAPLING_MODE  = os.environ.get("SCRAPLING_MODE", "basic")  # basic / stealth
 
 # ─── AI 配置：三API降级轮换 ──────────────────────────────────────────────────
@@ -591,6 +591,77 @@ def _finhub_stock_news(tickers, days=3):
         time.sleep(1.2)
     print(f"Finnhub stock news: {len(results)} articles")
     return results
+
+# ─── Gist 记忆体引擎（7天滚动观察列表）──────────────────────────────────────
+
+GIST_PAT = os.environ.get("GIST_PAT", "")
+GIST_ID  = os.environ.get("GIST_ID", "")
+
+def update_and_get_watchlist(today_top_tickers):
+    """读取 Gist 观察列表 → 清理7天过期 → 录入今日强势股（按天去重）→ 写回
+    返回: dict {ticker: {"count": int, "last_seen": "YYYY-MM-DDTHH:MM:SS+00:00"}}
+    """
+    if not GIST_PAT or not GIST_ID:
+        print("⚠️ 缺少 Gist 环境变量，记忆体失效")
+        return {}
+
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "Authorization": f"Bearer {GIST_PAT}",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+
+    # 1. 读取
+    watchlist = {}
+    try:
+        resp = requests.get(f"https://api.github.com/gists/{GIST_ID}", headers=headers, timeout=10)
+        if resp.status_code == 200:
+            content = resp.json()["files"]["watchlist.json"]["content"]
+            watchlist = json.loads(content)
+            print(f"Gist read OK: {len(watchlist)} tracked stocks")
+        else:
+            print(f"Gist read failed: HTTP {resp.status_code}")
+    except Exception as e:
+        print(f"Gist read failed: {e}")
+
+    # 2. 清理7天过期
+    now = datetime.now(timezone.utc)
+    cutoff = now - timedelta(days=7)
+    cleaned = {}
+    for k, v in watchlist.items():
+        try:
+            if datetime.fromisoformat(v["last_seen"]) > cutoff:
+                cleaned[k] = v
+        except Exception:
+            continue
+    pruned = len(watchlist) - len(cleaned)
+    if pruned:
+        print(f"Gist pruned {pruned} expired entries")
+
+    # 3. 录入今日强势股（同一天不重复计数）
+    now_str = now.isoformat()
+    now_date = now_str[:10]
+    for ticker in today_top_tickers:
+        if ticker in cleaned:
+            last_date = cleaned[ticker]["last_seen"][:10]
+            if last_date != now_date:
+                cleaned[ticker]["count"] += 1
+                cleaned[ticker]["last_seen"] = now_str
+        else:
+            cleaned[ticker] = {"count": 1, "last_seen": now_str}
+
+    # 4. 写回
+    try:
+        payload = {"files": {"watchlist.json": {"content": json.dumps(cleaned, indent=2)}}}
+        r = requests.patch(f"https://api.github.com/gists/{GIST_ID}", headers=headers, json=payload, timeout=10)
+        if r.status_code == 200:
+            print(f"Gist write OK: {len(cleaned)} stocks")
+        else:
+            print(f"Gist write failed: HTTP {r.status_code}")
+    except Exception as e:
+        print(f"Gist write failed: {e}")
+
+    return cleaned
 
 # ─── 期权深度分析（LongPort SDK）─────────────────────────────────────────────
 
@@ -1485,15 +1556,11 @@ def ai_analyze(vix_data, scored_stocks, stock_news, macro_news,
 
 PUSH_TITLES = {
     "morning": "🌙 美股选股·开盘前预热",
-    "open":    "🔔 美股选股·已开盘",
-    "midday":  "🌙 美股选股·半场复盘",
     "close":   "🏁 美股选股·收盘总结",
 }
 
 PUSH_SUBTITLES = {
     "morning": "开盘前45分钟 · 策略准备",
-    "open":    "开盘17分钟 · 方向确认",
-    "midday":  "半场 · 异动监控",
     "close":   "收盘 · 今日复盘 + 次日预判",
 }
 
@@ -1641,8 +1708,9 @@ def build_feishu_text(vix_data, scored_stocks, push_type, stock_news=None, macro
     if option_analyses:
         lines.append("📊 期权链深度分析")
         for oa in option_analyses:
+            sniper_tag = " 🎯狙击点" if oa.get("sniper") else ""
             iv_str = f" IV={oa['avg_iv']}%" if oa.get("avg_iv") else ""
-            lines.append(f"  【{oa['ticker']}】{oa.get('strategy','')} | 方向:{oa['direction']}{iv_str}")
+            lines.append(f"  【{oa['ticker']}】{oa.get('strategy','')} | 方向:{oa['direction']}{iv_str}{sniper_tag}")
             # 异动检测
             unusual = oa.get("unusual_activity", [])
             if unusual:
@@ -1753,36 +1821,64 @@ def main():
     # 5. 拉宏观新闻
     macro_news = fetch_news(vix)
 
-    # 6. 先执行 AI 个股新闻推理（TOP3逐只）→ 7. 再做期权分析（传入AI审判结果）
+    # 6. 先执行 AI 个股新闻推理（TOP3逐只）
     print(f"[STEP6] Starting AI stock reasoning...")
     stock_reasonings = batch_stock_reasoning(scored, stock_news)
 
+    # 7. Gist 记忆体更新（7天滚动观察列表）
+    today_strong_tickers = [s["ticker"] for s in scored if s["score"] > 60]
+    history_cache = update_and_get_watchlist(today_strong_tickers)
+
+    # 8. 基础期权分析（score>58 的 TOP3，带 AI 否决）
     top_buys = [s for s in scored if s["score"] > 58][:3]
-    print(f"[STEP7] Option analysis with AI Veto: {len(top_buys)} buy candidates ({[s['ticker'] for s in top_buys]})")
+    print(f"[STEP8] Option analysis with AI Veto: {len(top_buys)} buy candidates ({[s['ticker'] for s in top_buys]})")
     option_analyses = []
+    sniper_hits = []  # 狙击手命中的 ticker 列表
     for s in top_buys:
         ai_verdict = stock_reasonings.get(s["ticker"], {})
         ai_action = ai_verdict.get("action", "确认量化信号")
         oa = option_analysis(s["ticker"], s["price"], s["score"], vix, ai_action)
         option_analyses.append(oa)
+
+    # 9. 回踩狙击手（叠加模式：额外的狙击点分析）
+    print(f"[STEP9] Sniper Pullback Analysis...")
+    pullback_low = -5.0 if vix > 25 else -3.5
+    pullback_candidates = [s for s in scored if s["score"] > 58 and s.get("change_pct", 0) < 0]
+    existing_tickers = {oa["ticker"] for oa in option_analyses}
+    for s in pullback_candidates:
+        ticker = s["ticker"]
+        change_pct = s.get("change_pct", 0)
+        if ticker in existing_tickers:
+            continue  # 已在基础推荐中，跳过
+        if ticker in history_cache and history_cache[ticker]["count"] >= 2:
+            if pullback_low <= change_pct <= -1.0:
+                ai_verdict = stock_reasonings.get(ticker, {})
+                ai_action = ai_verdict.get("action", "确认量化信号")
+                if "降级" not in ai_action and "反转" not in ai_action:
+                    print(f"🎯 狙击点命中: {ticker} change={change_pct:+.1f}% count={history_cache[ticker]['count']}")
+                    oa = option_analysis(ticker, s["price"], s["score"], vix, ai_action)
+                    oa["sniper"] = True  # 标记为狙击手推荐
+                    option_analyses.append(oa)
+                    sniper_hits.append(ticker)
+
     # 汇总期权数据源分布
     ds_counts = {}
     for oa in option_analyses:
         ds = oa.get("data_source", "估算值")
         ds_counts[ds] = ds_counts.get(ds, 0) + 1
     real_count = sum(oa.get("real_data", False) for oa in option_analyses)
-    print(f"[STEP7] Option analyses done: {len(option_analyses)} results | 真实数据:{real_count}/{len(option_analyses)} | 数据源分布:{ds_counts}")
+    print(f"[STEP8-9] Option analyses done: {len(option_analyses)} results | 狙击点:{sniper_hits or '无'} | 真实数据:{real_count}/{len(option_analyses)} | 数据源分布:{ds_counts}")
 
-    # 8. AI 宏观策略推理（整合个股推理+期权分析）
-    print(f"[STEP8] Starting AI macro analysis...")
+    # 10. AI 宏观策略推理（整合个股推理+期权分析）
+    print(f"[STEP10] Starting AI macro analysis...")
     ai_summary = ai_analyze(vix_data, scored, stock_news, macro_news, option_analyses, stock_reasonings)
 
-    # 9. 构建消息
-    print(f"[STEP9] Building Feishu message...")
+    # 11. 构建消息
+    print(f"[STEP11] Building Feishu message...")
     text = build_feishu_text(vix_data, scored, push_type, stock_news, macro_news, ai_summary, option_analyses, stock_reasonings)
 
-    # 10. 推送
-    print(f"[STEP10] Pushing to Feishu ({len(text)} chars)...")
+    # 12. 推送
+    print(f"[STEP12] Pushing to Feishu ({len(text)} chars)...")
     success = push_to_feishu(text)
     sys.exit(0 if success else 1)
 
