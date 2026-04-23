@@ -139,7 +139,11 @@ UNIVERSE = [
 def fetch_vix():
     """多源获取 VIX：Twelve Data → Yahoo v8 → FRED (免费兜底)
     注: Finnhub 不支持 VIX 指数，已移除
+    返回: {"price", "change", "source", "as_of"}
     """
+    et = timezone(timedelta(hours=-4))
+    now_et = datetime.now(et)
+
     if TWELVE_DATA_KEY:
         try:
             url = f"https://api.twelvedata.com/quote?symbol=VIX:INDEXCBOE&apikey={TWELVE_DATA_KEY}"
@@ -147,10 +151,14 @@ def fetch_vix():
             data = r.json()
             if data.get("status") != "error" and data.get("close"):
                 price = float(data["close"])
-                prev = float(data.get("previous_close") or price)
-                chg = round((price - prev) / prev * 100, 2) if prev else 0
-                print(f"VIX from Twelve Data: {price}", flush=True)
-                return {"price": price, "change": chg}
+                # 优先用官方涨跌幅，避免自算时 previous_close 跨日不准
+                if data.get("change_percent"):
+                    chg = round(float(str(data["change_percent"]).replace("%", "")), 2)
+                else:
+                    prev = float(data.get("previous_close") or price)
+                    chg = round((price - prev) / prev * 100, 2) if prev else 0
+                print(f"VIX from Twelve Data: {price} (chg={chg}%)", flush=True)
+                return {"price": price, "change": chg, "source": "Twelve Data", "as_of": now_et.strftime("%m-%d %H:%M ET")}
             print(f"VIX Twelve Data error: {data.get('message', 'unknown')[:100]}")
         except Exception as e:
             print(f"VIX Twelve Data failed: {e}")
@@ -164,10 +172,14 @@ def fetch_vix():
         data = r.json()
         meta = data["chart"]["result"][0]["meta"]
         price = float(meta["regularMarketPrice"])
-        prev = float(meta.get("chartPreviousClose") or meta.get("previousClose") or price)
-        chg = round((price - prev) / prev * 100, 2) if prev else 0
-        print(f"VIX from Yahoo: {price}")
-        return {"price": price, "change": chg}
+        # 优先用官方涨跌幅，其次用 previousClose 自算，避免 chartPreviousClose 是5天前数据
+        if meta.get("regularMarketChangePercent"):
+            chg = round(float(meta["regularMarketChangePercent"]), 2)
+        else:
+            prev = float(meta.get("previousClose") or meta.get("chartPreviousClose") or price)
+            chg = round((price - prev) / prev * 100, 2) if prev else 0
+        print(f"VIX from Yahoo: {price} (chg={chg}%)")
+        return {"price": price, "change": chg, "source": "Yahoo", "as_of": now_et.strftime("%m-%d %H:%M ET")}
     except Exception as e:
         print(f"VIX Yahoo failed: {e}")
 
@@ -185,7 +197,7 @@ def fetch_vix():
                     prev_price = float(prev[1].strip())
                     chg = round((price - prev_price) / prev_price * 100, 2)
                     print(f"VIX from FRED: {price} (date: {last[0].strip()})")
-                    return {"price": price, "change": chg}
+                    return {"price": price, "change": chg, "source": "FRED", "as_of": last[0].strip()}
         print(f"VIX FRED: status={r.status_code}")
     except Exception as e:
         print(f"VIX FRED failed: {e}")
@@ -231,12 +243,18 @@ def fetch_quotes_twelvedata():
                         continue
                     try:
                         result[stock["ticker"]] = {
-                            "price":      float(q.get("close") or 0),
-                            "change_pct": float(q.get("percent_change") or 0),
-                            "high52w":    float(q.get("fifty_two_week", {}).get("high") or 0),
-                            "low52w":     float(q.get("fifty_two_week", {}).get("low") or 0),
-                            "pe":         float(q.get("pe") or 0) or None,
-                            "volume":     int(q.get("volume") or 0),
+                            "price":         float(q.get("close") or 0),
+                            "change_pct":    float(q.get("percent_change") or 0),
+                            "high52w":       float(q.get("fifty_two_week", {}).get("high") or 0),
+                            "low52w":        float(q.get("fifty_two_week", {}).get("low") or 0),
+                            "pe":            float(q.get("pe") or 0) or None,
+                            "volume":        int(q.get("volume") or 0),
+                            "avg_volume":    int(q.get("average_volume") or 0),
+                            "day_high":      float(q.get("high") or 0),
+                            "day_low":       float(q.get("low") or 0),
+                            "day_open":      float(q.get("open") or 0),
+                            "fifty_day_avg": float(q.get("fifty_day_average") or 0),
+                            "two_hundred_avg": float(q.get("two_hundred_day_average") or 0),
                         }
                     except Exception:
                         continue
@@ -321,19 +339,87 @@ def get_vix_regime(vix):
     return              {"label": "极度恐慌", "emoji": "🚨", "mode": "崩溃预警"}
 
 def get_weights(vix):
-    """因子权重随 VIX 动态调整
-    低 VIX: 偏重趋势位+动量（追涨）
-    高 VIX: 偏重估值+稳定（防守）
+    """因子权重随 VIX 动态调整（混合型：趋势确认+过热惩罚+回归加分）
+    低 VIX: 偏重趋势+回踩机会
+    高 VIX: 偏重估值+安全边际
     """
-    if vix < 15:  return {"momentum": 0.25, "quality": 0.15, "valuation": 0.10, "stability": 0.10, "position": 0.40}
-    if vix < 20:  return {"momentum": 0.25, "quality": 0.20, "valuation": 0.12, "stability": 0.13, "position": 0.30}
-    if vix < 25:  return {"momentum": 0.20, "quality": 0.22, "valuation": 0.18, "stability": 0.15, "position": 0.25}
-    if vix < 30:  return {"momentum": 0.12, "quality": 0.25, "valuation": 0.25, "stability": 0.20, "position": 0.18}
-    if vix < 35:  return {"momentum": 0.08, "quality": 0.25, "valuation": 0.30, "stability": 0.25, "position": 0.12}
-    return              {"momentum": 0.05, "quality": 0.22, "valuation": 0.35, "stability": 0.30, "position": 0.08}
+    if vix < 15:  return {"momentum": 0.18, "quality": 0.12, "valuation": 0.20, "stability": 0.10, "position": 0.22, "pullback": 0.18}
+    if vix < 20:  return {"momentum": 0.18, "quality": 0.15, "valuation": 0.20, "stability": 0.12, "position": 0.20, "pullback": 0.15}
+    if vix < 25:  return {"momentum": 0.15, "quality": 0.18, "valuation": 0.22, "stability": 0.15, "position": 0.15, "pullback": 0.15}
+    if vix < 30:  return {"momentum": 0.08, "quality": 0.20, "valuation": 0.28, "stability": 0.20, "position": 0.10, "pullback": 0.14}
+    if vix < 35:  return {"momentum": 0.05, "quality": 0.18, "valuation": 0.32, "stability": 0.25, "position": 0.08, "pullback": 0.12}
+    return              {"momentum": 0.03, "quality": 0.15, "valuation": 0.37, "stability": 0.28, "position": 0.05, "pullback": 0.12}
+
+def _momentum_hybrid(chg):
+    """混合型动量：温和上涨(3-5%)最优，暴涨(>8%)惩罚，下跌轻罚"""
+    if chg >= 0:
+        # 0~3%: 线性加分, 3~5%: 最优区间, 5~8%: 缓降, >8%: 惩罚
+        if chg <= 3:
+            return 50 + chg * 8
+        elif chg <= 5:
+            return 74 + (chg - 3) * 3   # 74~80
+        elif chg <= 8:
+            return 80 - (chg - 5) * 6   # 80~62
+        else:
+            return max(62 - (chg - 8) * 8, 15)  # 暴涨惩罚
+    else:
+        # 小跌(-1~-3%)轻微加分(回踩机会)，大跌(>-5%)扣分
+        if chg >= -1:
+            return 50 + chg * 2
+        elif chg >= -3:
+            return 48 + (chg + 1) * 4   # 48~40
+        elif chg >= -5:
+            return 40 + (chg + 3) * 5   # 40~30
+        else:
+            return max(30 + (chg + 5) * 4, 5)
+
+def _position_hybrid(pos52w):
+    """混合型趋势位：40-70%区间最优(有趋势但不过热)，>80%惩罚"""
+    if pos52w <= 20:
+        return 30 + pos52w * 0.5  # 30~40 低位回升
+    elif pos52w <= 40:
+        return 40 + (pos52w - 20) * 1.5  # 40~70 上升趋势确认
+    elif pos52w <= 70:
+        return 70 + (pos52w - 40) * 0.33  # 70~80 最优区间
+    elif pos52w <= 85:
+        return 80 - (pos52w - 70) * 1.5  # 80~57.5 过热预警
+    else:
+        return max(57.5 - (pos52w - 85) * 3, 15)  # 高位惩罚
+
+def _pullback_score(chg, pos52w=50, day_high=0, price=0, fifty_day_avg=0, volume=0, avg_volume=0):
+    """回踩因子（三维锁定）：趋势向上 + 短期回调 + 量价配合
+    ① 趋势过滤：52周位置>30% 且 价格>MA50 → 确认上升趋势
+    ② 回调检测：日跌1-5% 且 当日从高点回落 → 健康回调非暴跌
+    ③ 量价配合：成交量>均量70% → 有市场关注度
+    只有三维同时满足才给高分，否则大幅打折
+    """
+    # 基础分：日跌幅区间
+    if -5 <= chg <= -1:
+        base = 60 + (-chg - 1) * 8  # 60~92
+    elif -1 < chg < 0:
+        base = 55
+    elif 0 <= chg <= 2:
+        base = 50
+    else:
+        base = max(50 - (abs(chg) - 2) * 5, 10)
+
+    # 三维锁定检查
+    trend_ok = pos52w > 30 and (fifty_day_avg <= 0 or price >= fifty_day_avg * 0.97)
+    pullback_ok = -5 <= chg <= -1 and day_high > 0 and price < day_high * 0.99
+    volume_ok = avg_volume <= 0 or volume >= avg_volume * 0.7
+
+    locks = sum([trend_ok, pullback_ok, volume_ok])
+    if locks == 3:
+        return min(base, 95)       # 三维全满：满分
+    elif locks == 2:
+        return min(int(base * 0.7), 75)  # 两维：打7折
+    elif locks == 1:
+        return min(int(base * 0.4), 50)  # 一维：打4折
+    else:
+        return min(int(base * 0.2), 30)  # 无维度：严重打折
 
 def compute_score(quote, vix):
-    """五因子评分：动量 / 质量 / 估值 / 稳定性 / 趋势位"""
+    """六因子混合评分：动量(过热惩罚) / 质量 / 估值(加权重) / 稳定性 / 趋势位(过热惩罚) / 回踩加分"""
     if not quote or not quote.get("price"):
         return None
     price    = quote["price"]
@@ -345,8 +431,8 @@ def compute_score(quote, vix):
     rng = high52w - low52w
     pos52w = ((price - low52w) / rng * 100) if rng > 0 else 50
 
-    # 1. 动量：短期涨跌幅驱动
-    momentum = min(max(50 + chg * 5, 0), 100)
+    # 1. 动量（混合型：温和最优，暴涨惩罚）
+    momentum = min(max(_momentum_hybrid(chg), 0), 100)
 
     # 2. 质量：PE 合理区间（12-22）得分最优，偏离越远越差
     if pe and pe > 0:
@@ -360,15 +446,89 @@ def compute_score(quote, vix):
     # 4. 稳定性：日波动越小越稳
     stability = min(max(100 - abs(chg) * 8, 10), 95)
 
-    # 5. 趋势位：52周区间位置越高说明趋势越强（低VIX时追涨有效）
-    position = min(max(pos52w, 5), 95)
+    # 5. 趋势位（混合型：中位最优，高位惩罚）
+    position = min(max(_position_hybrid(pos52w), 5), 95)
+
+    # 6. 回踩因子（三维锁定：趋势+回调+量价）
+    pullback = min(max(_pullback_score(
+        chg, pos52w,
+        quote.get("day_high", 0), price,
+        quote.get("fifty_day_avg", 0),
+        quote.get("volume", 0), quote.get("avg_volume", 0)
+    ), 5), 95)
 
     w = get_weights(vix)
     score = (momentum   * w["momentum"]   +
              quality    * w["quality"]    +
              valuation  * w["valuation"]  +
              stability  * w["stability"]  +
-             position   * w["position"])
+             position   * w["position"]   +
+             pullback   * w["pullback"])
+    return round(score)
+
+def compute_score_reversal(quote, vix):
+    """均值回归评分：专门选超卖/低位票，等反弹
+    核心逻辑：越跌越多分越高，52周低位加分，估值便宜加分
+    """
+    if not quote or not quote.get("price"):
+        return None
+    price    = quote["price"]
+    chg      = quote["change_pct"]
+    high52w  = quote["high52w"] or price * 1.2
+    low52w   = quote["low52w"]  or price * 0.8
+    pe       = quote["pe"]
+
+    rng = high52w - low52w
+    pos52w = ((price - low52w) / rng * 100) if rng > 0 else 50
+
+    # 1. 动量（反转）：跌越多分越高
+    if chg < -3:
+        momentum = min(95, 70 + abs(chg) * 5)
+    elif chg < -1:
+        momentum = 60 + abs(chg) * 5
+    elif chg < 0:
+        momentum = 55
+    else:
+        momentum = max(50 - chg * 4, 20)  # 涨了扣分
+
+    # 2. 质量：PE偏低反而加分（价值陷阱检测）
+    if pe and pe > 0:
+        if pe < 15:
+            quality = 85
+        elif pe < 25:
+            quality = 70
+        elif pe < 40:
+            quality = 50
+        else:
+            quality = 30
+    else:
+        quality = 50
+
+    # 3. 估值（重权重）：越低越便宜=越好
+    valuation = min(max(100 - pos52w * 1.1, 10), 95)
+
+    # 4. 稳定性（反转）：波动大反而是机会
+    stability = 50  # 均值回归不关心稳定性
+
+    # 5. 趋势位：低位=安全边际高
+    position = min(max(100 - pos52w, 10), 95)
+
+    # 6. 回踩因子：跌得多加分多（均值回归也用三维锁定，但趋势条件放宽）
+    pullback = min(max(_pullback_score(
+        chg, pos52w,
+        quote.get("day_high", 0), price,
+        quote.get("fifty_day_avg", 0),
+        quote.get("volume", 0), quote.get("avg_volume", 0)
+    ), 5), 95)
+
+    # 均值回归权重：估值+回踩+低位主导
+    w = {"momentum": 0.12, "quality": 0.10, "valuation": 0.30, "stability": 0.05, "position": 0.25, "pullback": 0.18}
+    score = (momentum   * w["momentum"]   +
+             quality    * w["quality"]    +
+             valuation  * w["valuation"]  +
+             stability  * w["stability"]  +
+             position   * w["position"]   +
+             pullback   * w["pullback"])
     return round(score)
 
 def get_signal(score):
@@ -1570,9 +1730,10 @@ WEIGHT_LABELS = {
     "valuation":  "估值",
     "stability":  "稳定",
     "position":   "趋势位",
+    "pullback":   "回踩",
 }
 
-def build_feishu_text(vix_data, scored_stocks, push_type, stock_news=None, macro_news=None, ai_summary=None, option_analyses=None, stock_reasonings=None):
+def build_feishu_text(vix_data, scored_stocks, push_type, stock_news=None, macro_news=None, ai_summary=None, option_analyses=None, stock_reasonings=None, reversal_stocks=None):
     now_bjt = datetime.now(BJT).strftime("%Y-%m-%d %H:%M")
     vix     = vix_data["price"]
     vix_chg = vix_data["change"]
@@ -1589,7 +1750,10 @@ def build_feishu_text(vix_data, scored_stocks, push_type, stock_news=None, macro
 
     # VIX
     vix_chg_str = f"+{vix_chg:.1f}%" if vix_chg >= 0 else f"{vix_chg:.1f}%"
-    lines.append(f"{regime['emoji']} VIX 恐慌指数：{vix:.1f}（{vix_chg_str}）")
+    vix_src = vix_data.get("source", "?")
+    vix_as_of = vix_data.get("as_of", "")
+    vix_time_tag = f" [{vix_src} {vix_as_of}]" if vix_as_of else f" [{vix_src}]"
+    lines.append(f"{regime['emoji']} VIX 恐慌指数：{vix:.1f}（{vix_chg_str}）{vix_time_tag}")
     lines.append(f"市场情绪：{regime['label']} · 策略模式：{regime['mode']}")
     w_str = " · ".join([f"{WEIGHT_LABELS[k]} {round(v*100)}%" for k, v in w.items()])
     lines.append(f"当前权重 · {w_str}")
@@ -1636,6 +1800,25 @@ def build_feishu_text(vix_data, scored_stocks, push_type, stock_news=None, macro
                 f"  {icon} {s['ticker']} {'+' if chg>0 else ''}{chg:.1f}%  "
                 f"评分{s['score']}  {s['option_strategy']}"
             )
+        lines.append("")
+
+    # 均值回归参考（2只超卖票）
+    if reversal_stocks:
+        lines.append("🔄 均值回归参考（超跌反弹机会）")
+        for s in reversal_stocks[:2]:
+            chg = s["change_pct"]
+            chg_str = f"+{chg:.1f}%" if chg >= 0 else f"{chg:.1f}%"
+            ai_r = stock_reasonings.get(s["ticker"], {}) if stock_reasonings else {}
+            ai_stars = f" ⭐{ai_r.get('rating','-')}" if ai_r.get("rating") else ""
+            ai_action = ai_r.get("action", "")
+            action_tag = f" ⚖️{ai_action}" if ai_action and ai_action != "确认量化信号" else ""
+            lines.append(
+                f"  🔄 {s['ticker']} 评分{s['reversal_score']}  {chg_str}{ai_stars}  "
+                f"💡{s['option_strategy']}  📦{s['position']}{action_tag}"
+            )
+            if ai_r.get("reason"):
+                lines.append(f"     AI: {ai_r['reason']}")
+        lines.append("⚠️ 均值回归策略风险较高，建议配合CSP或Put Spread入场")
         lines.append("")
 
     # 期权提示
@@ -1792,11 +1975,13 @@ def main():
 
     # 3. 计算评分
     scored = []
+    reversal_candidates = []  # 均值回归候选
     for s in UNIVERSE:
         q = quotes.get(s["ticker"])
         score = compute_score(q, vix)
         if score is None:
             continue
+        rev_score = compute_score_reversal(q, vix)
         scored.append({
             **s,
             "score":           score,
@@ -1807,23 +1992,42 @@ def main():
             "change_pct":      q["change_pct"],
             "pe":              q.get("pe"),
         })
+        if rev_score and q.get("change_pct", 0) < 0:  # 只看下跌票
+            reversal_candidates.append({
+                **s,
+                "reversal_score":  rev_score,
+                "signal":          get_signal(rev_score),
+                "option_strategy": get_option_strategy(rev_score, vix),
+                "position":        get_position(rev_score, vix),
+                "price":           q["price"],
+                "change_pct":      q["change_pct"],
+                "pe":              q.get("pe"),
+            })
     scored.sort(key=lambda x: x["score"], reverse=True)
+    reversal_candidates.sort(key=lambda x: x["reversal_score"], reverse=True)
+    reversal_top2 = reversal_candidates[:2]
 
     if not scored:
         print("❌ No stocks scored, aborting")
         sys.exit(1)
     print(f"Scored {len(scored)} stocks, top: {scored[0]['ticker']} ({scored[0]['score']})")
+    if reversal_top2:
+        print(f"Reversal candidates: {[(r['ticker'], r['reversal_score']) for r in reversal_top2]}")
 
-    # 4. Scrapling 深度抓取个股新闻（TOP3，≥15条）
+    # 4. Scrapling 深度抓取个股新闻（TOP3 + 均值回归TOP2，≥15条）
     top3_tickers = [s["ticker"] for s in scored[:3]]
-    stock_news = scrapling_news(top3_tickers, min_total=15)
+    reversal_tickers = [s["ticker"] for s in reversal_top2]
+    news_tickers = list(dict.fromkeys(top3_tickers + reversal_tickers))  # 去重保序
+    stock_news = scrapling_news(news_tickers, min_total=15)
 
     # 5. 拉宏观新闻
     macro_news = fetch_news(vix)
 
-    # 6. 先执行 AI 个股新闻推理（TOP3逐只）
-    print(f"[STEP6] Starting AI stock reasoning...")
-    stock_reasonings = batch_stock_reasoning(scored, stock_news)
+    # 6. AI 个股新闻推理（TOP3 + 均值回归TOP2）
+    print(f"[STEP6] Starting AI stock reasoning for {len(news_tickers)} stocks...")
+    # 合并两个列表供AI推理，去重
+    reasoning_stocks = scored[:3] + [s for s in reversal_top2 if s["ticker"] not in {x["ticker"] for x in scored[:3]}]
+    stock_reasonings = batch_stock_reasoning(reasoning_stocks, stock_news)
 
     # 7. Gist 记忆体更新（7天滚动观察列表）
     today_strong_tickers = [s["ticker"] for s in scored if s["score"] > 60]
@@ -1875,7 +2079,7 @@ def main():
 
     # 11. 构建消息
     print(f"[STEP11] Building Feishu message...")
-    text = build_feishu_text(vix_data, scored, push_type, stock_news, macro_news, ai_summary, option_analyses, stock_reasonings)
+    text = build_feishu_text(vix_data, scored, push_type, stock_news, macro_news, ai_summary, option_analyses, stock_reasonings, reversal_top2)
 
     # 12. 推送
     print(f"[STEP12] Pushing to Feishu ({len(text)} chars)...")
