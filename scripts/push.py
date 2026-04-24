@@ -1618,7 +1618,7 @@ def ai_analyze(vix_data, scored_stocks, stock_news, macro_news,
     top3 = scored_stocks[:3]
 
     # ── 构建上下文 ──
-    ctx = f"## 市场环境\nVIX={vix:.1f}({regime['label']},模式:{regime['mode']}) 涨跌{vix_data['change']:+.1f}%\n\n"
+    ctx = f"## 市场环境\nVIX={vix:.1f}({regime['label']},模式:{regime['mode']})\n\n"
 
     # TOP3 评分 + AI评级
     ctx += "## TOP3评分\n"
@@ -1677,18 +1677,17 @@ def ai_analyze(vix_data, scored_stocks, stock_news, macro_news,
             ctx += "\n"
 
     # ── VIX 涨幅判断 ──
-    vix_chg = vix_data.get("change", 0)
-    vix_spike = vix_chg > 5
+    vix_spike = vix > 35  # 用绝对值判断，不参考涨跌幅
 
     # ── Prompt ──
     prompt = f"""{ctx}
 
 你是资深美股量化+期权策略师。基于以上所有数据（行情+个股AI推理+Scrapling深度新闻+期权链），进行深度推理。
 
-{"⚠️【🔴 宏观红线触发】VIX单日涨幅超过5%（当前+" + f"{vix_chg:.1f}" + "%），系统进入避险模式！" if vix_spike else ""}
+{"⚠️【🔴 宏观红线触发】VIX超过35（当前" + f"{vix:.1f}" + "），系统进入避险模式！" if vix_spike else ""}
 
 【🔴 宏观红线铁律 (最高优先级)】
-1. 情绪熔断：若 VIX 单日涨幅超过 5%，或宏观新闻涉及战争、局部冲突、重大自然灾害，【情绪判断】严禁给出"利好"，最高只能是"避险"。
+1. 情绪熔断：若 VIX 超过35，或宏观新闻涉及战争、局部冲突、重大自然灾害，【情绪判断】严禁给出"利好"，最高只能是"避险"。
 2. 策略约束：在避险/防守环境下，【期权交易建议】禁止推荐纯多头买方策略（如裸买 Call）。
 
 请输出以下结构化内容：
@@ -1736,7 +1735,6 @@ WEIGHT_LABELS = {
 def build_feishu_text(vix_data, scored_stocks, push_type, stock_news=None, macro_news=None, ai_summary=None, option_analyses=None, stock_reasonings=None, reversal_stocks=None):
     now_bjt = datetime.now(BJT).strftime("%Y-%m-%d %H:%M")
     vix     = vix_data["price"]
-    vix_chg = vix_data["change"]
     regime  = get_vix_regime(vix)
     w       = get_weights(vix)
 
@@ -1749,11 +1747,10 @@ def build_feishu_text(vix_data, scored_stocks, push_type, stock_news=None, macro
     lines.append("")
 
     # VIX
-    vix_chg_str = f"+{vix_chg:.1f}%" if vix_chg >= 0 else f"{vix_chg:.1f}%"
     vix_src = vix_data.get("source", "?")
     vix_as_of = vix_data.get("as_of", "")
     vix_time_tag = f" [{vix_src} {vix_as_of}]" if vix_as_of else f" [{vix_src}]"
-    lines.append(f"{regime['emoji']} VIX 恐慌指数：{vix:.1f}（{vix_chg_str}）{vix_time_tag}")
+    lines.append(f"{regime['emoji']} VIX 恐慌指数：{vix:.1f}{vix_time_tag}")
     lines.append(f"市场情绪：{regime['label']} · 策略模式：{regime['mode']}")
     w_str = " · ".join([f"{WEIGHT_LABELS[k]} {round(v*100)}%" for k, v in w.items()])
     lines.append(f"当前权重 · {w_str}")
@@ -1822,15 +1819,12 @@ def build_feishu_text(vix_data, scored_stocks, push_type, stock_news=None, macro
         lines.append("")
 
     # 期权提示
-    vix_chg = vix_data.get("change", 0)
     if vix >= 35:
         lines.append("🔴 VIX>35，极度恐慌！暂停期权买方，以卖方策略或空仓为主")
     elif vix >= 25:
         lines.append("🎯 VIX>25，IV偏高，卖方策略（CSP/Iron Condor）占优")
     else:
         lines.append("✅ VIX<25，IV偏低，买方策略（Long Call/Spread）成本合理")
-    if vix_chg > 5:
-        lines.append(f"🔴 宏观红线触发！VIX单日+{vix_chg:.1f}%，系统进入避险模式，禁止裸买Call")
     lines.append("")
 
     # 强买信号
