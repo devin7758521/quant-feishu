@@ -1986,7 +1986,7 @@ def main():
             "change_pct":      q["change_pct"],
             "pe":              q.get("pe"),
         })
-        if rev_score and q.get("change_pct", 0) < 0:  # 只看下跌票
+        if rev_score and q.get("change_pct", 0) < 1:  # 下跌或微涨票均可作为均值回归候选
             reversal_candidates.append({
                 **s,
                 "reversal_score":  rev_score,
