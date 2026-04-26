@@ -699,9 +699,13 @@ def scrapling_news(tickers, min_total=20):
                     titles = page.css(css_sel)
 
                     for el in titles[:3]:
-                        text = el.get() if hasattr(el, 'get') else (el.text.strip() if hasattr(el, 'text') else str(el).strip())
-                        if not text or len(text) < 10:
+                        # Handle Scrapling elements securely. Sometimes they contain whitespace.
+                        text = el.get() if hasattr(el, 'get') else (el.text if hasattr(el, 'text') else str(el))
+                        if text:
+                            text = text.strip()
+                        if not text or len(text) < 10 or text.isspace():
                             continue
+
                         key = text[:50].lower()
                         if key in seen_titles:
                             continue
@@ -719,6 +723,10 @@ def scrapling_news(tickers, min_total=20):
         if len(all_news) >= min_total:
             print(f"Scrapling total: {len(all_news)} articles (target met)")
             return all_news
+        else:
+            print(f"Scrapling total: {len(all_news)} articles (target not met, falling back to Finnhub for more)")
+            all_news.extend(_finhub_stock_news(tickers))
+            return all_news
 
     except ImportError:
         print("scrapling not installed, falling back to Finnhub")
@@ -726,7 +734,13 @@ def scrapling_news(tickers, min_total=20):
         print(f"Scrapling failed: {e}, falling back to Finnhub")
 
     # Fallback: Finnhub company-news
-    return _finhub_stock_news(tickers)
+    try:
+        all_news
+    except NameError:
+        all_news = []
+
+    all_news.extend(_finhub_stock_news(tickers))
+    return all_news
 
 def _finhub_stock_news(tickers, days=3):
     """Finnhub 兜底个股新闻"""
