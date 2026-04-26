@@ -10,6 +10,8 @@ import time
 import math
 import requests
 import xml.etree.ElementTree as ET
+import concurrent.futures
+import threading
 from datetime import datetime, timezone, timedelta
 
 # ─── 配置 ────────────────────────────────────────────────────────────────────
@@ -735,8 +737,22 @@ def _finhub_stock_news(tickers, days=3):
         return results
     from_date = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%d")
     to_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    for ticker in tickers:
+
+    # Use a lock and a shared last_request_time to implement rate limiting
+    rate_limit_lock = threading.Lock()
+    last_request_time = [0.0]
+    min_interval = 1.01  # Slightly more than 1 second to stay under 60 req/min
+
+    def fetch_ticker_news(ticker):
+        ticker_news = []
         try:
+            with rate_limit_lock:
+                now = time.time()
+                elapsed = now - last_request_time[0]
+                if elapsed < min_interval:
+                    time.sleep(min_interval - elapsed)
+                last_request_time[0] = time.time()
+
             url = (f"https://finnhub.io/api/v1/company-news?symbol={ticker}"
                    f"&from={from_date}&to={to_date}&token={FINNHUB_KEY}")
             r = requests.get(url, timeout=8)
@@ -745,10 +761,26 @@ def _finhub_stock_news(tickers, days=3):
                 headline = n.get("headline", "")
                 if headline:
                     cn = translate_to_cn(headline)
-                    results.append({"headline": cn, "source": n.get("source", ""), "ticker": ticker})
+                    ticker_news.append({"headline": cn, "source": n.get("source", ""), "ticker": ticker})
         except Exception:
-            continue
-        time.sleep(1.2)
+            pass
+        return ticker_news
+
+    # Even with rate limiting, we use ThreadPoolExecutor to allow other tickers
+    # to start their wait or process their results while one is fetching.
+    # Given the 1s rate limit, max_workers doesn't need to be high, but helps with overlap.
+    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+        # We want to preserve order as much as possible, although not strictly required.
+        # Mapping tickers to futures.
+        future_to_ticker = {executor.submit(fetch_ticker_news, ticker): ticker for ticker in tickers}
+        # To preserve order, iterate over tickers and get results from their corresponding futures.
+        for ticker in tickers:
+            # Find the future for this ticker
+            for future, t in future_to_ticker.items():
+                if t == ticker:
+                    results.extend(future.result())
+                    break
+
     print(f"Finnhub stock news: {len(results)} articles")
     return results
 
