@@ -10,6 +10,8 @@ import time
 import math
 import requests
 import xml.etree.ElementTree as ET
+import concurrent.futures
+import threading
 from datetime import datetime, timezone, timedelta
 
 # ─── 配置 ────────────────────────────────────────────────────────────────────
@@ -304,8 +306,47 @@ def fetch_quotes_finnhub(missing_tickers):
         time.sleep(1.2)  # 避免触发 60次/分钟 限制
     return result
 
+def fetch_quotes_yahoo(missing_tickers):
+    """Yahoo Finance 逐个行情（补缺兜底），无需 API Key"""
+    result = {}
+    for ticker in missing_tickers:
+        try:
+            url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}?range=1d&interval=1d"
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            }
+            r = requests.get(url, headers=headers, timeout=8)
+            data = r.json()
+            if data.get("chart") and data["chart"].get("result") and len(data["chart"]["result"]) > 0:
+                meta = data["chart"]["result"][0]["meta"]
+                price = float(meta["regularMarketPrice"])
+                if meta.get("regularMarketChangePercent"):
+                    change_pct = round(float(meta["regularMarketChangePercent"]), 2)
+                else:
+                    prev = float(meta.get("previousClose") or meta.get("chartPreviousClose") or price)
+                    change_pct = round((price - prev) / prev * 100, 2) if prev else 0
+
+                result[ticker] = {
+                    "price": price,
+                    "change_pct": change_pct,
+                    "high52w": meta.get("fiftyTwoWeekHigh", price * 1.2),
+                    "low52w": meta.get("fiftyTwoWeekLow", price * 0.8),
+                    "pe": None,
+                    "volume": meta.get("regularMarketVolume", 0),
+                    "avg_volume": 0,
+                    "day_high": meta.get("regularMarketDayHigh", price),
+                    "day_low": meta.get("regularMarketDayLow", price),
+                    "day_open": meta.get("regularMarketOpen", price),
+                    "fifty_day_avg": 0,
+                    "two_hundred_avg": 0,
+                }
+        except Exception:
+            continue
+        time.sleep(0.5)  # 防止请求过快被 Yahoo 限流
+    return result
+
 def fetch_quotes():
-    """主入口：Twelve Data → Finnhub 补缺（不覆盖已有数据）"""
+    """主入口：Twelve Data → Finnhub 补缺 → Yahoo 兜底（不覆盖已有数据）"""
     quotes = {}
     if TWELVE_DATA_KEY:
         try:
@@ -325,6 +366,19 @@ def fetch_quotes():
                 print(f"After Finnhub: {len(quotes)} stocks total")
             except Exception as e:
                 print(f"Finnhub failed: {e}")
+
+    missing = [s["ticker"] for s in UNIVERSE if s["ticker"] not in quotes]
+    if missing:
+        print(f"Yahoo supplementing {len(missing)} missing tickers...")
+        try:
+            yahoo_quotes = fetch_quotes_yahoo(missing)
+            for ticker, q in yahoo_quotes.items():
+                if ticker not in quotes:
+                    quotes[ticker] = q
+            print(f"After Yahoo: {len(quotes)} stocks total")
+        except Exception as e:
+            print(f"Yahoo failed: {e}")
+
     return quotes
 
 # ─── 量化评分引擎 ─────────────────────────────────────────────────────────────
@@ -735,8 +789,22 @@ def _finhub_stock_news(tickers, days=3):
         return results
     from_date = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%d")
     to_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    for ticker in tickers:
+
+    # Use a lock and a shared last_request_time to implement rate limiting
+    rate_limit_lock = threading.Lock()
+    last_request_time = [0.0]
+    min_interval = 1.01  # Slightly more than 1 second to stay under 60 req/min
+
+    def fetch_ticker_news(ticker):
+        ticker_news = []
         try:
+            with rate_limit_lock:
+                now = time.time()
+                elapsed = now - last_request_time[0]
+                if elapsed < min_interval:
+                    time.sleep(min_interval - elapsed)
+                last_request_time[0] = time.time()
+
             url = (f"https://finnhub.io/api/v1/company-news?symbol={ticker}"
                    f"&from={from_date}&to={to_date}&token={FINNHUB_KEY}")
             r = requests.get(url, timeout=8)
@@ -745,10 +813,26 @@ def _finhub_stock_news(tickers, days=3):
                 headline = n.get("headline", "")
                 if headline:
                     cn = translate_to_cn(headline)
-                    results.append({"headline": cn, "source": n.get("source", ""), "ticker": ticker})
+                    ticker_news.append({"headline": cn, "source": n.get("source", ""), "ticker": ticker})
         except Exception:
-            continue
-        time.sleep(1.2)
+            pass
+        return ticker_news
+
+    # Even with rate limiting, we use ThreadPoolExecutor to allow other tickers
+    # to start their wait or process their results while one is fetching.
+    # Given the 1s rate limit, max_workers doesn't need to be high, but helps with overlap.
+    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+        # We want to preserve order as much as possible, although not strictly required.
+        # Mapping tickers to futures.
+        future_to_ticker = {executor.submit(fetch_ticker_news, ticker): ticker for ticker in tickers}
+        # To preserve order, iterate over tickers and get results from their corresponding futures.
+        for ticker in tickers:
+            # Find the future for this ticker
+            for future, t in future_to_ticker.items():
+                if t == ticker:
+                    results.extend(future.result())
+                    break
+
     print(f"Finnhub stock news: {len(results)} articles")
     return results
 
@@ -946,7 +1030,7 @@ def fetch_option_chain_deep(ticker, ctx=None):
             option_symbols = []
             symbol_meta = {}  # symbol → {strike, type}
             for si in strike_infos[:20]:
-                strike = float(si.strike_price)
+                strike = float(si.price if hasattr(si, 'price') else getattr(si, 'strike_price', 0))
                 if si.call_symbol:
                     option_symbols.append(si.call_symbol)
                     symbol_meta[si.call_symbol] = {"strike": strike, "type": "call"}
@@ -972,22 +1056,27 @@ def fetch_option_chain_deep(ticker, ctx=None):
             # 合并报价 + Greeks
             for sym, meta in symbol_meta.items():
                 q = quotes_map.get(sym)
-                ext = q.option_extend if q and hasattr(q, 'option_extend') else None
                 greeks = greeks_map.get(sym, {})
+
+                # option_extend and bid_price/ask_price are not available directly in longport python SDK OptionQuote
+                expiry_val = getattr(q, 'expiry_date', exp_str)
+                if expiry_val and not isinstance(expiry_val, str):
+                    expiry_val = expiry_val.strftime("%Y-%m-%d") if hasattr(expiry_val, 'strftime') else str(expiry_val)
+
                 all_contracts.append({
                     "strike": meta["strike"],
-                    "expiry": ext.expiry_date if ext and hasattr(ext, 'expiry_date') else exp_str,
+                    "expiry": expiry_val,
                     "type": meta["type"],
-                    "bid": float(q.bid_price or 0) if q and hasattr(q, 'bid_price') and q.bid_price else 0,
-                    "ask": float(q.ask_price or 0) if q and hasattr(q, 'ask_price') and q.ask_price else 0,
-                    "last_done": float(q.last_done or 0) if q and hasattr(q, 'last_done') and q.last_done else 0,
-                    "iv": greeks.get("iv", float(ext.implied_volatility or 0) if ext and hasattr(ext, 'implied_volatility') else 0),
+                    "bid": getattr(q, 'bid_price', 0) if q else 0, # usually missing in OptionQuote
+                    "ask": getattr(q, 'ask_price', 0) if q else 0,
+                    "last_done": float(getattr(q, 'last_done', 0) or 0) if q else 0,
+                    "iv": greeks.get("iv", float(getattr(q, 'implied_volatility', 0) or 0)),
                     "delta": greeks.get("delta", 0),
                     "gamma": greeks.get("gamma", 0),
                     "theta": greeks.get("theta", 0),
                     "vega": greeks.get("vega", 0),
-                    "volume": int(q.volume or 0) if q and hasattr(q, 'volume') and q.volume else 0,
-                    "oi": int(ext.open_interest or 0) if ext and hasattr(ext, 'open_interest') else 0,
+                    "volume": int(getattr(q, 'volume', 0) or 0) if q else 0,
+                    "oi": int(getattr(q, 'open_interest', 0) or 0) if q else 0,
                 })
 
             time.sleep(0.2)
@@ -1439,7 +1528,6 @@ def ai_call(prompt, json_mode=False, max_retries=3):
 def _do_ai_call(provider, prompt, json_mode=False):
     """执行单个 API 调用"""
     name = provider["name"]
-    key = provider["api_key"]
 
     if name == "deepseek":
         return _call_openai_compat(provider, prompt, json_mode)
