@@ -946,7 +946,7 @@ def fetch_option_chain_deep(ticker, ctx=None):
             option_symbols = []
             symbol_meta = {}  # symbol → {strike, type}
             for si in strike_infos[:20]:
-                strike = float(si.strike_price)
+                strike = float(si.price if hasattr(si, 'price') else getattr(si, 'strike_price', 0))
                 if si.call_symbol:
                     option_symbols.append(si.call_symbol)
                     symbol_meta[si.call_symbol] = {"strike": strike, "type": "call"}
@@ -972,22 +972,27 @@ def fetch_option_chain_deep(ticker, ctx=None):
             # 合并报价 + Greeks
             for sym, meta in symbol_meta.items():
                 q = quotes_map.get(sym)
-                ext = q.option_extend if q and hasattr(q, 'option_extend') else None
                 greeks = greeks_map.get(sym, {})
+
+                # option_extend and bid_price/ask_price are not available directly in longport python SDK OptionQuote
+                expiry_val = getattr(q, 'expiry_date', exp_str)
+                if expiry_val and not isinstance(expiry_val, str):
+                    expiry_val = expiry_val.strftime("%Y-%m-%d") if hasattr(expiry_val, 'strftime') else str(expiry_val)
+
                 all_contracts.append({
                     "strike": meta["strike"],
-                    "expiry": ext.expiry_date if ext and hasattr(ext, 'expiry_date') else exp_str,
+                    "expiry": expiry_val,
                     "type": meta["type"],
-                    "bid": float(q.bid_price or 0) if q and hasattr(q, 'bid_price') and q.bid_price else 0,
-                    "ask": float(q.ask_price or 0) if q and hasattr(q, 'ask_price') and q.ask_price else 0,
-                    "last_done": float(q.last_done or 0) if q and hasattr(q, 'last_done') and q.last_done else 0,
-                    "iv": greeks.get("iv", float(ext.implied_volatility or 0) if ext and hasattr(ext, 'implied_volatility') else 0),
+                    "bid": getattr(q, 'bid_price', 0) if q else 0, # usually missing in OptionQuote
+                    "ask": getattr(q, 'ask_price', 0) if q else 0,
+                    "last_done": float(getattr(q, 'last_done', 0) or 0) if q else 0,
+                    "iv": greeks.get("iv", float(getattr(q, 'implied_volatility', 0) or 0)),
                     "delta": greeks.get("delta", 0),
                     "gamma": greeks.get("gamma", 0),
                     "theta": greeks.get("theta", 0),
                     "vega": greeks.get("vega", 0),
-                    "volume": int(q.volume or 0) if q and hasattr(q, 'volume') and q.volume else 0,
-                    "oi": int(ext.open_interest or 0) if ext and hasattr(ext, 'open_interest') else 0,
+                    "volume": int(getattr(q, 'volume', 0) or 0) if q else 0,
+                    "oi": int(getattr(q, 'open_interest', 0) or 0) if q else 0,
                 })
 
             time.sleep(0.2)
