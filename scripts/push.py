@@ -304,8 +304,47 @@ def fetch_quotes_finnhub(missing_tickers):
         time.sleep(1.2)  # 避免触发 60次/分钟 限制
     return result
 
+def fetch_quotes_yahoo(missing_tickers):
+    """Yahoo Finance 逐个行情（补缺兜底），无需 API Key"""
+    result = {}
+    for ticker in missing_tickers:
+        try:
+            url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}?range=1d&interval=1d"
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            }
+            r = requests.get(url, headers=headers, timeout=8)
+            data = r.json()
+            if data.get("chart") and data["chart"].get("result") and len(data["chart"]["result"]) > 0:
+                meta = data["chart"]["result"][0]["meta"]
+                price = float(meta["regularMarketPrice"])
+                if meta.get("regularMarketChangePercent"):
+                    change_pct = round(float(meta["regularMarketChangePercent"]), 2)
+                else:
+                    prev = float(meta.get("previousClose") or meta.get("chartPreviousClose") or price)
+                    change_pct = round((price - prev) / prev * 100, 2) if prev else 0
+
+                result[ticker] = {
+                    "price": price,
+                    "change_pct": change_pct,
+                    "high52w": meta.get("fiftyTwoWeekHigh", price * 1.2),
+                    "low52w": meta.get("fiftyTwoWeekLow", price * 0.8),
+                    "pe": None,
+                    "volume": meta.get("regularMarketVolume", 0),
+                    "avg_volume": 0,
+                    "day_high": meta.get("regularMarketDayHigh", price),
+                    "day_low": meta.get("regularMarketDayLow", price),
+                    "day_open": meta.get("regularMarketOpen", price),
+                    "fifty_day_avg": 0,
+                    "two_hundred_avg": 0,
+                }
+        except Exception:
+            continue
+        time.sleep(0.5)  # 防止请求过快被 Yahoo 限流
+    return result
+
 def fetch_quotes():
-    """主入口：Twelve Data → Finnhub 补缺（不覆盖已有数据）"""
+    """主入口：Twelve Data → Finnhub 补缺 → Yahoo 兜底（不覆盖已有数据）"""
     quotes = {}
     if TWELVE_DATA_KEY:
         try:
@@ -325,6 +364,19 @@ def fetch_quotes():
                 print(f"After Finnhub: {len(quotes)} stocks total")
             except Exception as e:
                 print(f"Finnhub failed: {e}")
+
+    missing = [s["ticker"] for s in UNIVERSE if s["ticker"] not in quotes]
+    if missing:
+        print(f"Yahoo supplementing {len(missing)} missing tickers...")
+        try:
+            yahoo_quotes = fetch_quotes_yahoo(missing)
+            for ticker, q in yahoo_quotes.items():
+                if ticker not in quotes:
+                    quotes[ticker] = q
+            print(f"After Yahoo: {len(quotes)} stocks total")
+        except Exception as e:
+            print(f"Yahoo failed: {e}")
+
     return quotes
 
 # ─── 量化评分引擎 ─────────────────────────────────────────────────────────────
