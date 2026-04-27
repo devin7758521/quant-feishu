@@ -1499,7 +1499,6 @@ def ai_call(prompt, json_mode=False, max_retries=3):
 def _do_ai_call(provider, prompt, json_mode=False):
     """执行单个 API 调用"""
     name = provider["name"]
-    key = provider["api_key"]
 
     if name == "deepseek":
         return _call_openai_compat(provider, prompt, json_mode)
