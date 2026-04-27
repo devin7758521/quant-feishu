@@ -700,18 +700,12 @@ def fetch_news(vix=None):
 # ─── Scrapling 深度新闻抓取 ──────────────────────────────────────────────────
 
 SCRAPLING_NEWS_SOURCES = [
-    # (name, url_template, css_selector)
-    # CSS 选择器参考 Scrapling 官方文档: page.css() 支持 Scrapy/Parsel 语法
-    ("Yahoo Finance",  "https://finance.yahoo.com/quote/{ticker}/news/",  "h3 a::text, h3::text"),
-    ("MarketWatch",    "https://www.marketwatch.com/investing/stock/{ticker}", "h3.article__headline::text"),
+    ("Finviz",         "https://finviz.com/quote.ashx?t={ticker}",       "table.fullview-news-outer tr td a.tab-link-news::text"),
+    ("Google News",    "https://news.google.com/search?q={ticker}+stock&hl=en-US&gl=US&ceid=US:en", "a.JtKRv::text"),
+    ("MarketWatch",    "https://www.marketwatch.com/investing/stock/{ticker}", "h3.article__headline a::text"),
     ("SeekingAlpha",   "https://seekingalpha.com/symbol/{ticker}/news",   "a[data-test-id='post-list-item-title']::text"),
-    ("Google News",    "https://news.google.com/search?q={ticker}+stock&hl=en-US", "h3::text, h4::text"),
-    ("Reuters",        "https://www.reuters.com/search/news?query={ticker}", "h3.search-result-title::text"),
-    ("Benzinga",       "https://www.benzinga.com/quote/{ticker}",          "h2::text, h3.title::text"),
-    ("Investing.com",  "https://www.investing.com/equities/{ticker}-news", "article a[title]::attr(title)"),
-    ("TipRanks",       "https://www.tipranks.com/stocks/{ticker}/news",    "h3::text, a.title::text"),
-    ("Barrons",        "https://www.barrons.com/market-data/stocks/{ticker}", "h3::text"),
-    ("CNBC",          "https://www.cnbc.com/quotes/{ticker}?tab=news",     "a.title::text"),
+    ("Benzinga",       "https://www.benzinga.com/quote/{ticker}",          "h3.title::text"),
+    ("CNBC",           "https://www.cnbc.com/quotes/{ticker}?tab=news",     "a.title::text"),
 ]
 
 def scrapling_news(tickers, min_total=20):
