@@ -669,25 +669,39 @@ def fetch_news(vix=None):
             "technology": "CAAqJggKIiBDQkFTRWdvSUwyMHZNRGRqTVhZU0FtVnVHZ0pWVXlnQVAB",
         }
         seen = set()
-        for section, topic_id in sections.items():
+        seen_lock = threading.Lock()
+
+        def fetch_google_news_section(item):
+            section, topic_id = item
             rss_url = f"https://news.google.com/rss/topics/{topic_id}?hl=en-US&gl=US&ceid=US:en"
             headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0"}
+            local_news = []
             try:
                 r = requests.get(rss_url, headers=headers, timeout=8)
-                if r.status_code != 200:
-                    continue
-                root = ET.fromstring(r.text)
-                for item in root.findall(".//item")[:3]:
-                    title = item.findtext("title", "").strip()
-                    title_key = title[:60].lower()
-                    if title_key in seen or not title:
-                        continue
-                    seen.add(title_key)
-                    cn = translate_to_cn(title)
-                    all_news.append({"headline": cn, "source": "Google News", "category": section})
+                if r.status_code == 200:
+                    root = ET.fromstring(r.text)
+                    for item_node in root.findall(".//item")[:3]:
+                        title = item_node.findtext("title", "").strip()
+                        title_key = title[:60].lower()
+                        if not title:
+                            continue
+
+                        is_new = False
+                        with seen_lock:
+                            if title_key not in seen:
+                                seen.add(title_key)
+                                is_new = True
+
+                        if is_new:
+                            cn = translate_to_cn(title)
+                            local_news.append({"headline": cn, "source": "Google News", "category": section})
             except Exception:
-                continue
-            time.sleep(0.3)
+                pass
+            return local_news
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=len(sections)) as executor:
+            for result in executor.map(fetch_google_news_section, sections.items()):
+                all_news.extend(result)
         print(f"Google News: {len([n for n in all_news if n['source']=='Google News'])} items from {list(sections.keys())}")
     except Exception as e:
         print(f"Google News failed: {e}")
