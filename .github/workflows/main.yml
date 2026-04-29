@@ -72,6 +72,5 @@ jobs:
           TWITTER_PASSWORD:    ${{ secrets.TWITTER_PASSWORD }}
           TWITTER_EMAIL:       ${{ secrets.TWITTER_EMAIL }}
           TWSCRAPE_GIST_ID:    ${{ secrets.TWSCRAPE_GIST_ID }}
-          GIST_PAT:            ${{ secrets.GIST_PAT }}
           GIST_ID:               ${{ secrets.GIST_ID }}
         run: python -u scripts/push.py
