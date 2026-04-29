@@ -1,0 +1,5 @@
+requests>=2.28,<3
+scrapling[fetchers]>=0.1,<1
+longport>=1.0,<2
+twscrape>=0.14,<1
+snscrape>=0.7,<1
