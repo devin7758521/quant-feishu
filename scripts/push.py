@@ -144,6 +144,7 @@ UNIVERSE = [
 import asyncio
 import base64
 import tempfile
+import importlib.util
 
 # 主方案所需环境变量
 TWITTER_USERNAME  = os.environ.get("TWITTER_USERNAME", "")
@@ -151,6 +152,83 @@ TWITTER_PASSWORD  = os.environ.get("TWITTER_PASSWORD", "")
 TWITTER_EMAIL     = os.environ.get("TWITTER_EMAIL", "")
 GIST_PAT          = os.environ.get("GIST_PAT", "")          # 复用项目已有
 TWSCRAPE_GIST_ID  = os.environ.get("TWSCRAPE_GIST_ID", "")  # 新建一个空 Gist 存 db
+
+
+def _twitter_observability_snapshot(username: str) -> dict:
+    """收集 Twitter 抓取可观测性信息（不抛异常）。"""
+    snapshot = {
+        "username": username,
+        "env": {
+            "TWITTER_USERNAME": bool(TWITTER_USERNAME),
+            "TWITTER_PASSWORD": bool(TWITTER_PASSWORD),
+            "TWITTER_EMAIL": bool(TWITTER_EMAIL),
+            "GIST_PAT": bool(GIST_PAT),
+            "TWSCRAPE_GIST_ID": bool(TWSCRAPE_GIST_ID),
+        },
+        "deps": {
+            "twscrape": importlib.util.find_spec("twscrape") is not None,
+            "snscrape": importlib.util.find_spec("snscrape") is not None,
+        },
+        "network": {
+            "twitter_home_ok": None,
+            "github_gist_ok": None,
+            "errors": {},
+        },
+    }
+
+    try:
+        r = requests.get("https://twitter.com", timeout=8)
+        snapshot["network"]["twitter_home_ok"] = (200 <= r.status_code < 400)
+    except Exception as e:
+        snapshot["network"]["twitter_home_ok"] = False
+        snapshot["network"]["errors"]["twitter_home"] = str(e)
+
+    if GIST_PAT and TWSCRAPE_GIST_ID:
+        try:
+            r = requests.get(
+                f"https://api.github.com/gists/{TWSCRAPE_GIST_ID}",
+                headers={"Authorization": f"token {GIST_PAT}"},
+                timeout=8,
+            )
+            snapshot["network"]["github_gist_ok"] = (200 <= r.status_code < 300)
+            if not snapshot["network"]["github_gist_ok"]:
+                snapshot["network"]["errors"]["github_gist"] = f"HTTP {r.status_code}"
+        except Exception as e:
+            snapshot["network"]["github_gist_ok"] = False
+            snapshot["network"]["errors"]["github_gist"] = str(e)
+
+    return snapshot
+
+
+def _print_twitter_observability(snapshot: dict):
+    """打印 Twitter 抓取健康诊断。"""
+    env = snapshot["env"]
+    deps = snapshot["deps"]
+    net = snapshot["network"]
+    masked_user = TWITTER_USERNAME[:2] + "***" if TWITTER_USERNAME else "(empty)"
+
+    print("🧪 [Twitter诊断] 环境变量:")
+    print(
+        f"   TWITTER_USERNAME={env['TWITTER_USERNAME']} ({masked_user}) | "
+        f"TWITTER_PASSWORD={env['TWITTER_PASSWORD']} | "
+        f"TWITTER_EMAIL={env['TWITTER_EMAIL']}"
+    )
+    print(
+        f"   GIST_PAT={env['GIST_PAT']} | "
+        f"TWSCRAPE_GIST_ID={env['TWSCRAPE_GIST_ID']}"
+    )
+
+    print("🧪 [Twitter诊断] 依赖状态:")
+    print(f"   twscrape={deps['twscrape']} | snscrape={deps['snscrape']}")
+
+    print("🧪 [Twitter诊断] 网络连通:")
+    print(
+        f"   twitter.com={net['twitter_home_ok']} | "
+        f"github_gist={net['github_gist_ok']}"
+    )
+    if net["errors"]:
+        for k, v in net["errors"].items():
+            print(f"   ⚠️ {k}: {v}")
 
 
 # ── Gist 持久化辅助 ────────────────────────────────────────────────────────
@@ -319,6 +397,13 @@ def fetch_twitter_timeline(username="joely7758521"):
             last_id = f.read().strip()
 
     raw_tweets: list = []
+
+    # 可观测性诊断（不影响主流程）
+    try:
+        snapshot = _twitter_observability_snapshot(username)
+        _print_twitter_observability(snapshot)
+    except Exception as e:
+        print(f"⚠️ Twitter 可观测性诊断失败（已忽略）: {e}")
 
     # ── 主方案 ──
     if TWITTER_USERNAME and TWITTER_PASSWORD:
