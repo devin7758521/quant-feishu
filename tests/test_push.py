@@ -12,7 +12,10 @@ sys.modules["longport.openapi"] = mock.MagicMock()
 sys.modules["scrapling"] = mock.MagicMock()
 sys.modules["scrapling.fetchers"] = mock.MagicMock()
 
-from push import get_vix_regime, get_signal, get_option_strategy, get_position, scrapling_news
+from push import (
+    get_vix_regime, get_signal, get_option_strategy, get_position,
+    scrapling_news, _position_hybrid
+)
 import pytest
 import unittest
 from unittest.mock import patch, MagicMock
@@ -97,6 +100,17 @@ def test_get_option_strategy(score, vix, expected):
 ])
 def test_get_position(score, vix, expected):
     assert get_position(score, vix) == expected
+
+@pytest.mark.parametrize("pos52w, expected", [
+    (0, 30.0),
+    (20, 40.0),
+    (40, 70.0),
+    (70, 79.9),
+    (85, 57.5),
+    (100, 15.0),
+])
+def test_position_hybrid(pos52w, expected):
+    assert pytest.approx(_position_hybrid(pos52w)) == expected
 
 
 @patch('push.translate_to_cn', return_value="Translated")
