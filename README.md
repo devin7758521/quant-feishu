@@ -9,10 +9,8 @@
 
 | 推送 | 时间 | 内容 |
 |------|------|------|
-| 🌙 开盘预热 | **21:47** | VIX + TOP10评分 + 期权策略 |
-| 🔔 开盘确认 | **22:47** | 开盘方向 + 异动提醒 |
-| 🌙 半场复盘 | **02:17** | 半场总结 + 异动股 |
-| 🏁 收盘总结 | **05:47** | 今日复盘 + 强买信号 |
+| 🌙 盘前预热 | **21:47** | VIX + TOP3混合评分 + 期权策略 + 均值回归参考 |
+| 🏁 收盘总结 | **05:47** | 今日复盘 + AI策略研判 + 狙击点 |
 
 ---
 
@@ -44,12 +42,15 @@
 | `LONGPORT_ACCESS_TOKEN` | 长桥 OpenAPI Access Token |
 | `DEEPSEEK_API_KEY` | DeepSeek API Key（deepseek.com 注册）|
 | `DEEPSEEK_BASE_URL` | DeepSeek 自定义端点（可选，默认官方）|
-| `DEEPSEEK_MODEL` | DeepSeek 模型名（可选，默认 deepseek-chat）|
+| `DEEPSEEK_MODEL` | DeepSeek 模型名（可选，默认 deepseek-v4-flash）|
 | `GEMINI_API_KEY` | Gemini API Key #1（aistudio.google.com 免费）|
 | `GEMINI_MODEL` | Gemini #1 模型名（可选，默认 gemini-2.0-flash）|
 | `GEMINI_API_KEY_2` | Gemini API Key #2（第二个账号/项目，可选）|
 | `GEMINI_MODEL_2` | Gemini #2 模型名（可选，默认 gemini-2.0-flash）|
-| `RAPIDAPI_KEY` | RapidAPI Key（用于抓取 X/Twitter 数据，建议订阅 Twitter API45 等免费/廉价接口）|
+| `TWITTER_USERNAME` | Twitter 用户名（twscrape 抓取推文用）|
+| `TWITTER_PASSWORD` | Twitter 密码 |
+| `TWITTER_EMAIL` | Twitter 绑定邮箱 |
+| `TWSCRAPE_GIST_ID` | twscrape 状态持久化 Gist ID（可选）|
 | `SCRAPLING_MODE` | Scrapling 抓取模式：`basic`（默认，HTTP）或 `stealth`（Playwright反爬）|
 
 > **AI降级轮换**: deepseek → gemini → gemini2，每次调用自动轮换，失败自动降级到下一个。至少配置1个API Key即可运行。
@@ -73,18 +74,17 @@ GitHub → Actions → Quant Alpha 飞书推送 → Run workflow → 选类型 �
 ## 飞书消息内容
 
 每次推送包含：
-- **VIX 恐慌指数** + 涨跌幅 + 市场情绪判断
-- **当前因子权重**（随VIX自动调整）
-- **TOP10 评分排名**：评分、信号、AI评级、期权策略、仓位建议
-- **AI 个股推理**：逐只新闻汇总分析 + 评级(0-5星) + 核心推理逻辑
+- **VIX 恐慌指数** + 市场情绪判断 + 因子权重
+- **混合型评分 TOP3**：评分、AI评级(0-5星)、AI审判、期权策略、仓位
+- **均值回归参考 TOP2**：超跌反弹机会（仅当日有下跌票时显示）
 - **异动股提醒**（涨跌>3%）
 - **宏观新闻**：市场要闻、商业财经、国际政经、科技动态
-- **个股深度新闻**：Scrapling 抓取全网新闻/公告/机构评论（≥20条），去重过滤
-- **X/Twitter 动态监控**：实时跟进 @joely7758521 的最新推文及配图状态
-- **期权合约建议**（基础版：评分+VIX 查表）
-- **期权链深度分析**：LongPort 真实期权链 + 希腊值 + 流动性筛选 + 最优合约推荐 + 盈亏分析
-- **强买信号列表**（评分>72的标的）
-- **AI 宏观策略研判**：整合 个股推理 + Scrapling新闻 + 期权分析的结构化推理（简讯/情绪/核心事件/风险/期权建议）
+- **个股深度新闻**：Scrapling 抓取全网新闻/公告/机构评论（≥15条）
+- **X/Twitter 动态监控**：实时跟进 @joely7758521 的最新推文
+- **期权合约建议**（AI否决+降级逻辑）
+- **期权链深度分析**：LongPort 真实期权链 + 希腊值 + 最优合约推荐
+- **回踩狙击点**：Gist 7天记忆体 + 三维回踩锁定
+- **AI 宏观策略研判**：结构化推理（简讯/情绪/核心事件/风险/期权建议）
 
 ---
 
