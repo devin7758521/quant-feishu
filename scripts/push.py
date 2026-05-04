@@ -2480,13 +2480,16 @@ def build_feishu_card(vix_data, scored_stocks, push_type, stock_news=None, macro
         elements.append({"tag": "div", "text": {"tag": "lark_md", "content": f"**🤖 AI 策略研判**\n{short}"}})
         elements.append({"tag": "hr"})
 
-    # 9. Twitter
-    if joely_tweets:
-        md = "**🐦 Joely 最新动态**"
-        for t in joely_tweets:
-            txt = t.get("text", "")[:120]
-            img = f" 📷{len(t.get('images',[]))}张" if t.get("images") else ""
-            md += f"\n▸ {txt}{img}"
+    # 9. Twitter（始终展示）
+    if joely_tweets is not None:
+        if joely_tweets:
+            md = "**🐦 Joely 最新动态**"
+            for t in joely_tweets:
+                txt = t.get("text", "")[:120]
+                img = f" 📷{len(t.get('images',[]))}张" if t.get("images") else ""
+                md += f"\n▸ {txt}{img}"
+        else:
+            md = "**🐦 Joely 最新动态**\n（等待新推文...）"
         elements.append({"tag": "div", "text": {"tag": "lark_md", "content": md}})
         elements.append({"tag": "hr"})
 
@@ -2538,12 +2541,12 @@ def main():
         sys.exit(0)
 
 # 0.5 抓取推特
-    joely_tweets = []
+    joely_tweets = None
     try:
-        new_tweets = fetch_twitter_timeline("joely7758521")
-        joely_tweets = new_tweets
+        joely_tweets = fetch_twitter_timeline("joely7758521") or []
     except Exception as e:
         print(f"❌ Error in Twitter fetch: {e}")
+        joely_tweets = []  # 抓取失败也传空数组，让卡片显示状态
 
     # 1. 拉 VIX
     vix_data = fetch_vix()
