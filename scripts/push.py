@@ -139,306 +139,66 @@ UNIVERSE = [
 # ─── 数据获取 ─────────────────────────────────────────────────────────────────
 
 
-# ─── Twitter 抓取（twscrape 主 + snscrape 备）──────────────────────────────
-
-import asyncio
-import base64
-import tempfile
-import importlib.util
-
-# 主方案所需环境变量
-TWITTER_USERNAME  = os.environ.get("TWITTER_USERNAME", "")
-TWITTER_PASSWORD  = os.environ.get("TWITTER_PASSWORD", "")
-TWITTER_EMAIL     = os.environ.get("TWITTER_EMAIL", "")
-GIST_PAT          = os.environ.get("GIST_PAT", "")          # 复用项目已有
-TWSCRAPE_GIST_ID  = os.environ.get("TWSCRAPE_GIST_ID", "")  # 新建一个空 Gist 存 db
 
 
-def _twitter_observability_snapshot(username: str) -> dict:
-    """收集 Twitter 抓取可观测性信息（不抛异常）。"""
-    snapshot = {
-        "username": username,
-        "env": {
-            "TWITTER_USERNAME": bool(TWITTER_USERNAME),
-            "TWITTER_PASSWORD": bool(TWITTER_PASSWORD),
-            "TWITTER_EMAIL": bool(TWITTER_EMAIL),
-            "GIST_PAT": bool(GIST_PAT),
-            "TWSCRAPE_GIST_ID": bool(TWSCRAPE_GIST_ID),
-        },
-        "deps": {
-            "twscrape": importlib.util.find_spec("twscrape") is not None,
-            "snscrape": importlib.util.find_spec("snscrape") is not None,
-        },
-        "network": {
-            "twitter_home_ok": None,
-            "github_gist_ok": None,
-            "errors": {},
-        },
-    }
+# ─── Twitter 抓取（RSSHub 主 + Nitter 备）──────────────────────────────────
+# 无需环境变量，不需要账号，GitHub Actions 在美国可直接访问
 
-    try:
-        r = requests.get("https://twitter.com", timeout=8)
-        snapshot["network"]["twitter_home_ok"] = (200 <= r.status_code < 400)
-    except Exception as e:
-        snapshot["network"]["twitter_home_ok"] = False
-        snapshot["network"]["errors"]["twitter_home"] = str(e)
+def _parse_rss_xml(xml_bytes, limit=10):
+    """解析 RSS/Atom XML 提取推文列表"""
+    import xml.etree.ElementTree as ET
+    root = ET.fromstring(xml_bytes)
+    tweets = []
 
-    if GIST_PAT and TWSCRAPE_GIST_ID:
+    # Atom 格式（RSSHub）
+    ns = {"atom": "http://www.w3.org/2005/Atom"}
+    for entry in (root.findall(".//atom:entry", ns) or root.findall(".//entry"))[:limit]:
+        link_el = entry.find("atom:link", ns) or entry.find("link")
+        tid = ""
+        if link_el is not None:
+            href = link_el.get("href", "") or (link_el.text or "")
+            tid = href.split("/")[-1] if "/" in href else href
+        title_el = entry.find("atom:title", ns) or entry.find("title")
+        text = (title_el.text or "") if title_el is not None else ""
+        tweets.append({"id": tid, "text": text, "images": []})
+
+    # RSS 2.0 格式（Nitter）
+    if not tweets:
+        for item in (root.findall(".//item"))[:limit]:
+            guid = item.find("guid")
+            link = item.find("link")
+            tid = ""
+            if guid is not None:
+                tid = guid.text.split("/")[-1] if "/" in (guid.text or "") else (guid.text or "")
+            elif link is not None:
+                tid = link.text.split("/")[-1] if "/" in (link.text or "") else (link.text or "")
+            title_el = item.find("title")
+            text = (title_el.text or "") if title_el is not None else ""
+            tweets.append({"id": tid, "text": text, "images": []})
+
+    return tweets
+
+
+def fetch_twitter_timeline(username="joely7758521", limit=10):
+    """通过 RSSHub / Nitter 抓取用户最新推文。无需环境变量，0 额外依赖。"""
+    sources = [
+        ("RSSHub",  "https://rsshub.app/twitter/user/{}".format(username)),
+        ("Nitter1", "https://nitter.tiekoetter.com/{}/rss".format(username)),
+        ("Nitter2", "https://nitter.poast.org/{}/rss".format(username)),
+    ]
+    for name, url in sources:
         try:
-            r = requests.get(
-                f"https://api.github.com/gists/{TWSCRAPE_GIST_ID}",
-                headers={"Authorization": f"token {GIST_PAT}"},
-                timeout=8,
-            )
-            snapshot["network"]["github_gist_ok"] = (200 <= r.status_code < 300)
-            if not snapshot["network"]["github_gist_ok"]:
-                snapshot["network"]["errors"]["github_gist"] = f"HTTP {r.status_code}"
+            r = requests.get(url, timeout=12)
+            if r.status_code == 200 and len(r.content) > 200:
+                tweets = _parse_rss_xml(r.content, limit)
+                if tweets:
+                    print("  [{}] {} tweets".format(name, len(tweets)))
+                    return tweets
+            print("  [{}] HTTP {} ({}b)".format(name, r.status_code, len(r.content)))
         except Exception as e:
-            snapshot["network"]["github_gist_ok"] = False
-            snapshot["network"]["errors"]["github_gist"] = str(e)
-
-    return snapshot
-
-
-def _print_twitter_observability(snapshot: dict):
-    """打印 Twitter 抓取健康诊断。"""
-    env = snapshot["env"]
-    deps = snapshot["deps"]
-    net = snapshot["network"]
-    masked_user = TWITTER_USERNAME[:2] + "***" if TWITTER_USERNAME else "(empty)"
-
-    print("🧪 [Twitter诊断] 环境变量:")
-    print(
-        f"   TWITTER_USERNAME={env['TWITTER_USERNAME']} ({masked_user}) | "
-        f"TWITTER_PASSWORD={env['TWITTER_PASSWORD']} | "
-        f"TWITTER_EMAIL={env['TWITTER_EMAIL']}"
-    )
-    print(
-        f"   GIST_PAT={env['GIST_PAT']} | "
-        f"TWSCRAPE_GIST_ID={env['TWSCRAPE_GIST_ID']}"
-    )
-
-    print("🧪 [Twitter诊断] 依赖状态:")
-    print(f"   twscrape={deps['twscrape']} | snscrape={deps['snscrape']}")
-
-    print("🧪 [Twitter诊断] 网络连通:")
-    print(
-        f"   twitter.com={net['twitter_home_ok']} | "
-        f"github_gist={net['github_gist_ok']}"
-    )
-    if net["errors"]:
-        for k, v in net["errors"].items():
-            print(f"   ⚠️ {k}: {v}")
-
-
-# ── Gist 持久化辅助 ────────────────────────────────────────────────────────
-
-def _gist_download_db(gist_id: str, token: str):
-    """从 Gist 下载 twscrape accounts.db（base64 编码存储）"""
-    try:
-        r = requests.get(
-            f"https://api.github.com/gists/{gist_id}",
-            headers={"Authorization": f"token {token}"},
-            timeout=15,
-        )
-        content = r.json().get("files", {}).get("accounts_db.b64", {}).get("content", "")
-        if content:
-            return base64.b64decode(content)
-    except Exception as e:
-        print(f"⚠️ Gist 下载 twscrape db 失败: {e}")
-    return None
-
-
-def _gist_upload_db(db_path: str, gist_id: str, token: str):
-    """将 twscrape accounts.db 上传到 Gist（base64 编码）"""
-    try:
-        with open(db_path, "rb") as f:
-            encoded = base64.b64encode(f.read()).decode()
-        requests.patch(
-            f"https://api.github.com/gists/{gist_id}",
-            headers={"Authorization": f"token {token}"},
-            json={"files": {"accounts_db.b64": {"content": encoded}}},
-            timeout=15,
-        )
-        print("✅ twscrape db 已同步到 Gist")
-    except Exception as e:
-        print(f"⚠️ Gist 上传 twscrape db 失败: {e}")
-
-
-# ── 主方案：twscrape ───────────────────────────────────────────────────────
-
-async def _twscrape_fetch_async(username: str, limit: int = 10) -> list:
-    try:
-        from twscrape import API
-        from twscrape.models import Tweet
-    except ImportError:
-        print("⚠️ twscrape 未安装，跳过主方案")
-        return []
-
-    with tempfile.TemporaryDirectory() as tmpdir:
-        import os as _os
-        db_path = _os.path.join(tmpdir, "accounts.db")
-
-        # 从 Gist 恢复 session db
-        if GIST_PAT and TWSCRAPE_GIST_ID:
-            db_bytes = _gist_download_db(TWSCRAPE_GIST_ID, GIST_PAT)
-            if db_bytes:
-                with open(db_path, "wb") as f:
-                    f.write(db_bytes)
-                print("✅ 已从 Gist 恢复 twscrape session db")
-
-        api = API(db_path)
-
-        # 确保账号已登录（幂等，已登录则跳过）
-        if TWITTER_USERNAME and TWITTER_PASSWORD:
-            try:
-                await api.pool.add_account(
-                    TWITTER_USERNAME,
-                    TWITTER_PASSWORD,
-                    TWITTER_EMAIL,
-                    "",          # email_password，不需要可留空
-                )
-                await api.pool.login_all()
-            except Exception as e:
-                # add_account 重复添加会报错，正常现象，忽略即可
-                print(f"ℹ️ twscrape 账号初始化: {e}")
-
-        # 获取用户 uid
-        try:
-            user = await api.user_by_login(username)
-            if not user:
-                print(f"⚠️ twscrape 找不到用户 @{username}")
-                return []
-        except Exception as e:
-            print(f"⚠️ twscrape 获取用户信息失败: {e}")
-            return []
-
-        results = []
-        try:
-            async for tweet in api.user_tweets(user.id, limit=limit):
-                image_urls = []
-                if tweet.media and tweet.media.photos:
-                    image_urls = [p.url for p in tweet.media.photos if p.url]
-                results.append({
-                    "id":     str(tweet.id),
-                    "text":   tweet.rawContent or "",
-                    "images": image_urls,
-                    "date":   tweet.date.isoformat() if tweet.date else "",
-                })
-        except Exception as e:
-            print(f"⚠️ twscrape 抓取推文异常: {e}")
-
-        # 同步最新 db 回 Gist（即使 results 为空也要同步，保持 session 有效）
-        if GIST_PAT and TWSCRAPE_GIST_ID and _os.path.exists(db_path):
-            _gist_upload_db(db_path, TWSCRAPE_GIST_ID, GIST_PAT)
-
-    return results
-
-
-def _twscrape_fetch(username: str, limit: int = 10) -> list:
-    """同步包装 twscrape 异步函数"""
-    try:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        result = loop.run_until_complete(_twscrape_fetch_async(username, limit))
-        loop.close()
-        return result
-    except Exception as e:
-        print(f"❌ twscrape 运行失败: {e}")
-        return []
-
-
-# ── 备用方案：snscrape ─────────────────────────────────────────────────────
-
-def _snscrape_fetch(username: str, limit: int = 10) -> list:
-    """
-    备用方案：snscrape，无需账号，但稳定性较低（X 改接口会失效）。
-    """
-    try:
-        import snscrape.modules.twitter as sntwitter
-        results = []
-        for tweet in sntwitter.TwitterUserScraper(username).get_items():
-            if len(results) >= limit:
-                break
-            image_urls = []
-            if tweet.media:
-                for m in tweet.media:
-                    url = getattr(m, "fullUrl", None) or getattr(m, "previewUrl", None)
-                    if url:
-                        image_urls.append(url)
-            results.append({
-                "id":     str(tweet.id),
-                "text":   tweet.content or "",
-                "images": image_urls,
-                "date":   tweet.date.isoformat() if tweet.date else "",
-            })
-        return results
-    except Exception as e:
-        print(f"⚠️ snscrape 抓取失败: {e}")
-        return []
-
-
-# ── 统一入口 ───────────────────────────────────────────────────────────────
-
-def fetch_twitter_timeline(username="joely7758521"):
-    """
-    抓取 X/Twitter 用户最新推文（仅返回上次以来的新推文）。
-
-    优先级：
-      1. twscrape（需 TWITTER_USERNAME / TWITTER_PASSWORD + TWSCRAPE_GIST_ID）
-      2. snscrape（无需账号，自动降级）
-      3. 均失败则返回 []，不影响主流程
-    """
-    # 读取上次推送的最新 tweet id，用于增量过滤
-    last_id_file = f".{username}_last_tweet_id"
-    last_id = ""
-    if os.path.exists(last_id_file):
-        with open(last_id_file) as f:
-            last_id = f.read().strip()
-
-    raw_tweets: list = []
-
-    # 可观测性诊断（不影响主流程）
-    try:
-        snapshot = _twitter_observability_snapshot(username)
-        _print_twitter_observability(snapshot)
-    except Exception as e:
-        print(f"⚠️ Twitter 可观测性诊断失败（已忽略）: {e}")
-
-    # ── 主方案 ──
-    if TWITTER_USERNAME and TWITTER_PASSWORD:
-        print("🐦 [主方案] twscrape 抓取中...")
-        raw_tweets = _twscrape_fetch(username)
-        if raw_tweets:
-            print(f"✅ twscrape 成功，共 {len(raw_tweets)} 条")
-        else:
-            print("⚠️ twscrape 返回空，切换备用方案")
-
-    # ── 备用方案 ──
-    if not raw_tweets:
-        print("🐦 [备用方案] snscrape 抓取中...")
-        raw_tweets = _snscrape_fetch(username)
-        if raw_tweets:
-            print(f"✅ snscrape 成功，共 {len(raw_tweets)} 条")
-        else:
-            print("❌ 两个方案均失败，本次跳过 Twitter 抓取")
-            return []
-
-    # ── 增量过滤：只保留 last_id 之后的新推文 ──
-    new_tweets = []
-    for t in raw_tweets:
-        if t["id"] == last_id:
-            break
-        new_tweets.append(t)
-
-    if new_tweets:
-        with open(last_id_file, "w") as f:
-            f.write(new_tweets[0]["id"])
-        print(f"✅ @{username} 有 {len(new_tweets)} 条新推文")
-    else:
-        print(f"ℹ️ @{username} 无新推文（上次 id: {last_id or '首次运行'}）")
-
-    return new_tweets
+            print("  [{}] {}: {}".format(name, type(e).__name__, str(e)[:60]))
+    print("  All Twitter sources failed")
+    return []
 
 
 def fetch_vix():

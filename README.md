@@ -47,10 +47,7 @@
 | `GEMINI_MODEL` | Gemini #1 模型名（可选，默认 gemini-2.0-flash）|
 | `GEMINI_API_KEY_2` | Gemini API Key #2（第二个账号/项目，可选）|
 | `GEMINI_MODEL_2` | Gemini #2 模型名（可选，默认 gemini-2.0-flash）|
-| `TWITTER_USERNAME` | Twitter 用户名（twscrape 抓取推文用）|
-| `TWITTER_PASSWORD` | Twitter 密码 |
-| `TWITTER_EMAIL` | Twitter 绑定邮箱 |
-| `TWSCRAPE_GIST_ID` | twscrape 状态持久化 Gist ID（可选）|
+| *(Twitter 无需配置)* | 通过 RSSHub/Nitter 免费抓取，不需任何 Secrets |
 | `SCRAPLING_MODE` | Scrapling 抓取模式：`basic`（默认，HTTP）或 `stealth`（Playwright反爬）|
 
 > **AI降级轮换**: deepseek → gemini → gemini2，每次调用自动轮换，失败自动降级到下一个。至少配置1个API Key即可运行。
@@ -80,7 +77,7 @@ GitHub → Actions → Quant Alpha 飞书推送 → Run workflow → 选类型 �
 - **异动股提醒**（涨跌>3%）
 - **宏观新闻**：市场要闻、商业财经、国际政经、科技动态
 - **个股深度新闻**：Scrapling 抓取全网新闻/公告/机构评论（≥15条）
-- **X/Twitter 动态监控**：实时跟进 @joely7758521 的最新推文
+- **X/Twitter 动态监控**：RSSHub/Nitter 自动抓取 @joely7758521 最新推文（无需账号）
 - **期权合约建议**（AI否决+降级逻辑）
 - **期权链深度分析**：LongPort 真实期权链 + 希腊值 + 最优合约推荐
 - **回踩狙击点**：Gist 7天记忆体 + 三维回踩锁定
