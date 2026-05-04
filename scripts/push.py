@@ -2342,17 +2342,182 @@ def build_feishu_text(vix_data, scored_stocks, push_type, stock_news=None, macro
     lines.append(f"⏰ {now_bjt} 北京时间 · 选股播报推送消息 · 数据仅供参考")
     return "\n".join(lines)
 
+# ─── 飞书卡片构建（消息卡片 JSON）──────────────────────────────────────────────
+
+def build_feishu_card(vix_data, scored_stocks, push_type, stock_news=None, macro_news=None,
+                      ai_summary=None, option_analyses=None, stock_reasonings=None,
+                      reversal_stocks=None, joely_tweets=None):
+    """构建飞书 interactive 卡片消息"""
+    now_bjt = datetime.now(BJT).strftime("%Y-%m-%d %H:%M")
+    vix     = vix_data["price"]
+    regime  = get_vix_regime(vix)
+    w       = get_weights(vix)
+
+    top3   = scored_stocks[:3]
+    movers = [s for s in scored_stocks if abs(s["change_pct"]) > 3]
+
+    def _chg_str(chg):
+        return f"+{chg:.1f}%" if chg >= 0 else f"{chg:.1f}%"
+
+    def _sig_icon(s):
+        ai_r = stock_reasonings.get(s["ticker"], {}) if stock_reasonings else {}
+        act = ai_r.get("action", "")
+        if act == "反转为反向操作": return "⛔ AI反转"
+        if act == "降级为观望":     return "⚠️ AI降级"
+        if s["signal"] == "买入":  return "✅"
+        if s["signal"] == "中性":  return "➖"
+        return "❌"
+
+    def _top3_line(s):
+        ai_r = stock_reasonings.get(s["ticker"], {}) if stock_reasonings else {}
+        stars = f"⭐{ai_r.get('rating','-')}" if ai_r.get("rating") else ""
+        sig = _sig_icon(s)
+        cd = "📈" if s["change_pct"] >= 0 else "📉"
+        return f"**{s['ticker']}** {sig} 评分{s['score']} {cd}{_chg_str(s['change_pct'])} {stars} 💡{s['option_strategy']}"
+
+    # ── 色调 ──
+    if vix >= 35:       header_tpl = "red"
+    elif vix >= 25:     header_tpl = "orange"
+    else:               header_tpl = "green"
+
+    vix_src = vix_data.get("source", "?")
+    vix_as_of = vix_data.get("as_of", "")
+    vix_tag = f" [{vix_src} {vix_as_of}]" if vix_as_of else f" [{vix_src}]"
+    w_str = " · ".join([f"{WEIGHT_LABELS[k]} {round(v*100)}%" for k, v in w.items()])
+
+    elements = []
+
+    # 1. VIX
+    elements.append({"tag": "div", "text": {"tag": "lark_md",
+        "content": f"**{regime['emoji']} VIX {vix:.1f}** · {regime['label']} · {regime['mode']}{vix_tag}\n权重 · {w_str}"}})
+    elements.append({"tag": "hr"})
+
+    # 2. TOP3
+    md = "**📊 综合评分 TOP3**"
+    for s in top3:
+        md += f"\n\n{_top3_line(s)}"
+        ai_r = stock_reasonings.get(s["ticker"], {}) if stock_reasonings else {}
+        r = ai_r.get("reason", "")
+        if r:
+            md += f"\n> {r[:150]}"
+        act = ai_r.get("action", "")
+        if act and act not in ("", "确认量化信号"):
+            md += f"\n> ⚖️ *{act}*"
+    elements.append({"tag": "div", "text": {"tag": "lark_md", "content": md}})
+    elements.append({"tag": "hr"})
+
+    # 3. 均值回归
+    if reversal_stocks:
+        md = "**🔄 均值回归参考**"
+        for s in reversal_stocks[:2]:
+            ai_r = stock_reasonings.get(s["ticker"], {}) if stock_reasonings else {}
+            stars = f"⭐{ai_r.get('rating','-')}" if ai_r.get("rating") else ""
+            act = ai_r.get("action", "")
+            atag = f" ⚖️{act}" if act and act != "确认量化信号" else ""
+            md += f"\n\n**{s['ticker']}** 评分{s['reversal_score']} {_chg_str(s['change_pct'])} {stars} 💡{s['option_strategy']}{atag}"
+            r = ai_r.get("reason", "")
+            if r:
+                md += f"\n> {r[:100]}"
+        md += "\n\n⚠️ 均值回归风险较高，建议CSP或Put Spread入场"
+        elements.append({"tag": "div", "text": {"tag": "lark_md", "content": md}})
+        elements.append({"tag": "hr"})
+
+    # 4. 异动
+    if movers:
+        items = []
+        for s in movers[:8]:
+            icon = "🚀" if s["change_pct"] > 0 else "💥"
+            items.append(f"{icon} {s['ticker']} {_chg_str(s['change_pct'])}")
+        elements.append({"tag": "div", "text": {"tag": "lark_md", "content": f"**🚀 异动扫描**\n{' · '.join(items[:4])}\n{' · '.join(items[4:])}" if len(items) > 4 else f"**🚀 异动扫描**\n{' · '.join(items)}"}})
+        if vix >= 35:       tip = "🔴 VIX>35，暂停期权买方，卖方策略或空仓为主"
+        elif vix >= 25:     tip = "🎯 VIX>25，IV偏高，卖方策略（CSP/Iron Condor）占优"
+        else:               tip = "✅ VIX<25，IV偏低，买方策略（Long Call/Spread）成本合理"
+        elements.append({"tag": "div", "text": {"tag": "lark_md", "content": tip}})
+        elements.append({"tag": "hr"})
+
+    # 5. 新闻
+    if macro_news:
+        mn, bn, wn, tn = macro_news
+        md = "**📰 新闻速览**"
+        for title, news in [("📰 市场", mn[:3]), ("💼 商业", bn[:3]), ("🌍 国际", wn[:2]), ("💻 科技", tn[:2])]:
+            if news:
+                md += "\n" + " · ".join([f"[{n.get('source','?')}]" if n.get('source') else "" + n["headline"][:50] for n in news])
+        elements.append({"tag": "div", "text": {"tag": "lark_md", "content": md}})
+        elements.append({"tag": "hr"})
+
+    # 6. 个股深度新闻
+    if stock_news:
+        by_t = {}
+        for n in stock_news:
+            by_t.setdefault(n.get("ticker",""), []).append(n)
+        md = "**📋 个股深度新闻**"
+        for tk in [s["ticker"] for s in scored_stocks[:3]]:
+            for n in by_t.get(tk, [])[:2]:
+                md += f"\n[{tk}] {n.get('source','?')} {n['headline'][:80]}"
+        elements.append({"tag": "div", "text": {"tag": "lark_md", "content": md}})
+        elements.append({"tag": "hr"})
+
+    # 7. 期权深度分析
+    if option_analyses:
+        md = "**📊 期权分析**"
+        for oa in option_analyses:
+            tag = " 🎯狙击点" if oa.get("sniper") else ""
+            iv = f" IV{oa['avg_iv']}%" if oa.get("avg_iv") else ""
+            md += f"\n\n**{oa['ticker']}** {oa.get('strategy','')} | 方向:{oa['direction']}{iv}{tag}"
+            for c in oa.get("contracts", [])[:2]:
+                md += f"\n▸ {c}"
+            bp = oa.get("breakeven")
+            if bp:
+                md += f" | BP:${bp}"
+        elements.append({"tag": "div", "text": {"tag": "lark_md", "content": md}})
+        elements.append({"tag": "hr"})
+
+    # 8. AI 策略研判
+    if ai_summary:
+        short = ai_summary.strip()[:600]
+        if len(ai_summary) > 600:
+            short += "..."
+        elements.append({"tag": "div", "text": {"tag": "lark_md", "content": f"**🤖 AI 策略研判**\n{short}"}})
+        elements.append({"tag": "hr"})
+
+    # 9. Twitter
+    if joely_tweets:
+        md = "**🐦 Joely 最新动态**"
+        for t in joely_tweets:
+            txt = t.get("text", "")[:120]
+            img = f" 📷{len(t.get('images',[]))}张" if t.get("images") else ""
+            md += f"\n▸ {txt}{img}"
+        elements.append({"tag": "div", "text": {"tag": "lark_md", "content": md}})
+        elements.append({"tag": "hr"})
+
+    # 10. 页脚
+    elements.append({"tag": "note", "elements": [{"tag": "plain_text", "content": f"⏰ {now_bjt} · 数据仅供参考，不构成投资建议"}]})
+
+    return {
+        "msg_type": "interactive",
+        "card": {
+            "config": {"wide_screen_mode": True},
+            "header": {"title": {"tag": "plain_text", "content": PUSH_TITLES.get(push_type, "📊 量化选股播报")}, "template": header_tpl},
+            "elements": elements,
+        }
+    }
+
+
 # ─── 推送飞书 ─────────────────────────────────────────────────────────────────
 
-def push_to_feishu(text):
+def push_to_feishu(payload):
+    """统一推送入口，payload 可以是：
+    - 字符串 → 发送 text 消息
+    - dict → 发送 interactive 卡片
+    """
     if not FEISHU_WEBHOOK:
         print("❌ FEISHU_WEBHOOK_URL not set")
         return False
-    payload = {
-        "msg_type": "text",
-        "content": {"text": text},
-    }
-    r = requests.post(FEISHU_WEBHOOK, json=payload, timeout=10)
+    if isinstance(payload, str):
+        data = {"msg_type": "text", "content": {"text": payload}}
+    else:
+        data = payload  # 卡片 JSON
+    r = requests.post(FEISHU_WEBHOOK, json=data, timeout=10)
     result = r.json()
     if result.get("StatusCode") == 0 or result.get("code") == 0:
         print("✅ Feishu push success")
@@ -2499,13 +2664,13 @@ def main():
     print(f"[STEP10] Starting AI macro analysis...")
     ai_summary = ai_analyze(vix_data, scored, stock_news, macro_news, option_analyses, stock_reasonings)
 
-    # 11. 构建消息
-    print(f"[STEP11] Building Feishu message...")
-    text = build_feishu_text(vix_data, scored, push_type, stock_news, macro_news, ai_summary, option_analyses, stock_reasonings, reversal_top2, joely_tweets)
+    # 11. 构建消息（卡片模式）
+    print(f"[STEP11] Building Feishu card...")
+    payload = build_feishu_card(vix_data, scored, push_type, stock_news, macro_news, ai_summary, option_analyses, stock_reasonings, reversal_top2, joely_tweets)
 
     # 12. 推送
-    print(f"[STEP12] Pushing to Feishu ({len(text)} chars)...")
-    success = push_to_feishu(text)
+    print(f"[STEP12] Pushing to Feishu...")
+    success = push_to_feishu(payload)
     sys.exit(0 if success else 1)
 
 if __name__ == "__main__":
