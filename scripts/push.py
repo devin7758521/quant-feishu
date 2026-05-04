@@ -51,7 +51,7 @@ if _ds_key:
         "name": "deepseek",
         "api_key": _ds_key,
         "base_url": _env("DEEPSEEK_BASE_URL", "https://api.deepseek.com"),
-        "model": _env("DEEPSEEK_MODEL", "deepseek-chat"),
+        "model": _env("DEEPSEEK_MODEL", "deepseek-v4-flash"),
     })
 
 # 兼容旧环境变量
@@ -62,7 +62,7 @@ if not AI_PROVIDERS:
             "name": os.environ.get("AI_PROVIDER", "deepseek"),
             "api_key": _fallback_key,
             "base_url": os.environ.get("AI_BASE_URL", "https://api.deepseek.com"),
-            "model": os.environ.get("AI_MODEL", "deepseek-chat"),
+            "model": os.environ.get("AI_MODEL", "deepseek-v4-flash"),
         })
 
 _ai_provider_idx = 0  # 轮换索引
