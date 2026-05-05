@@ -69,24 +69,82 @@ _ai_provider_idx = 0  # 轮换索引
 
 BJT = timezone(timedelta(hours=8))
 
-# ─── 美股休市日（NYSE 2025-2026 主要假日）────────────────────────────────────
+# ─── 美股休市日（NYSE 假日，动态计算，支持任意年份）──────────────────────────
 
-NYSE_HOLIDAYS = {
-    # 2025
-    "2025-01-01", "2025-01-20", "2025-02-17", "2025-04-18",
-    "2025-05-26", "2025-06-19", "2025-07-04", "2025-09-01",
-    "2025-11-27", "2025-12-25",
-    # 2026
-    "2026-01-01", "2026-01-19", "2026-02-16", "2026-04-03",
-    "2026-05-25", "2026-06-19", "2026-07-03", "2026-09-07",
-    "2026-11-26", "2026-12-25",
-}
+def _easter_sunday(year):
+    """Oudin-Tondering 算法计算复活节日期（返回 date 对象）"""
+    a = year % 19
+    b = year // 100
+    c = year % 100
+    d = b // 4
+    e = b % 4
+    f = (b + 8) // 25
+    g = (b - f + 1) // 3
+    h = (19 * a + b - d - g + 15) % 30
+    i = c // 4
+    k = c % 4
+    L = (32 + 2 * e + 2 * i - h - k) % 7
+    m = (a + 11 * h + 22 * L) // 451
+    month = (h + L - 7 * m + 114) // 31
+    day = ((h + L - 7 * m + 114) % 31) + 1
+    return datetime(year, month, day, tzinfo=timezone.utc).date()
+
+
+def _observe_weekday(d):
+    """周末调整：周六→前一天(周五)，周日→后一天(周一)"""
+    if d.weekday() == 5:      # Saturday
+        return d - timedelta(days=1)
+    elif d.weekday() == 6:    # Sunday
+        return d + timedelta(days=1)
+    return d
+
+
+def _nth_weekday(year, month, weekday, n):
+    """返回某年某月的第 n 个星期几（例如第3个星期一）"""
+    first = datetime(year, month, 1, tzinfo=timezone.utc).date()
+    days_ahead = (weekday - first.weekday()) % 7
+    return first + timedelta(days=days_ahead + 7 * (n - 1))
+
+
+def _last_weekday(year, month, weekday):
+    """返回某年某月的最后一个星期几"""
+    last_day = datetime(year, month + 1, 1, tzinfo=timezone.utc).date() - timedelta(days=1)
+    days_behind = (last_day.weekday() - weekday) % 7
+    return last_day - timedelta(days=days_behind)
+
+
+def _get_nyse_holidays(year):
+    """返回某年所有 NYSE 休市日的 date 集合"""
+    return {
+        # New Year's Day (Jan 1)
+        _observe_weekday(datetime(year, 1, 1, tzinfo=timezone.utc).date()),
+        # Martin Luther King Jr. Day (3rd Monday in January)
+        _nth_weekday(year, 1, 0, 3),
+        # Presidents' Day (3rd Monday in February)
+        _nth_weekday(year, 2, 0, 3),
+        # Good Friday (Easter Sunday - 2 days)
+        _easter_sunday(year) - timedelta(days=2),
+        # Memorial Day (last Monday in May)
+        _last_weekday(year, 5, 0),
+        # Juneteenth (Jun 19)
+        _observe_weekday(datetime(year, 6, 19, tzinfo=timezone.utc).date()),
+        # Independence Day (Jul 4)
+        _observe_weekday(datetime(year, 7, 4, tzinfo=timezone.utc).date()),
+        # Labor Day (1st Monday in September)
+        _nth_weekday(year, 9, 0, 1),
+        # Thanksgiving (4th Thursday in November)
+        _nth_weekday(year, 11, 3, 4),
+        # Christmas Day (Dec 25)
+        _observe_weekday(datetime(year, 12, 25, tzinfo=timezone.utc).date()),
+    }
+
 
 def is_market_holiday():
     """检查今天（美东时间）是否为 NYSE 休市日"""
     et = timezone(timedelta(hours=-4))  # EDT
-    today_et = datetime.now(et).strftime("%Y-%m-%d")
-    return today_et in NYSE_HOLIDAYS
+    today_et = datetime.now(et).date()
+    holidays = _get_nyse_holidays(today_et.year)
+    return today_et in holidays
 
 # ─── 股票池（30只，含2指数ETF）─────────────────────────────────────────────────
 # 七姐妹(Magnificent 7): AAPL, MSFT, NVDA, AMZN, META, GOOGL, TSLA 必选
