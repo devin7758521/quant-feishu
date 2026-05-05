@@ -1024,6 +1024,12 @@ def _longport_ctx():
         from longport.openapi import QuoteContext, Config
         config = Config.from_env()
         ctx = QuoteContext(config)
+        # 诊断：打印当前行情等级，方便排查期权权限
+        try:
+            lv = ctx.quote_level()
+            print(f"LongPort quote level: {lv}")
+        except Exception:
+            pass
         return ctx
     except ImportError:
         print("longport SDK not installed, skip real option data")
@@ -1098,6 +1104,7 @@ def fetch_option_chain_deep(ticker, ctx=None):
             return []
 
         all_contracts = []
+        any_quote_ok = False  # 标记是否有任意一个 expiry 报价成功
         # 取最近3个到期日
         for exp in expiry_dates[:3]:
             exp_str = exp.strftime("%Y-%m-%d") if hasattr(exp, 'strftime') else str(exp)
@@ -1129,8 +1136,15 @@ def fetch_option_chain_deep(ticker, ctx=None):
                 quotes = ctx.option_quote(option_symbols)
                 for q in quotes:
                     quotes_map[q.symbol] = q
+                if quotes_map:
+                    any_quote_ok = True
             except Exception as e:
-                log(f"  LongPort option_quote failed for {ticker} expiry {exp_str}: {e}")
+                err = str(e)
+                if "301604" in err:
+                    log(f"  LongPort option_quote 权限不足(301604): {ticker} expiry {exp_str}")
+                    log(f"  → 请在长桥App 我的→行情商城 确认已购买 美股期权行情 并重新生成 ACCESS_TOKEN")
+                else:
+                    log(f"  LongPort option_quote failed for {ticker} expiry {exp_str}: {e}")
 
             # 步骤4: 批量获取 Greeks
             greeks_map = _get_greeks(ctx, option_symbols)
@@ -1163,6 +1177,9 @@ def fetch_option_chain_deep(ticker, ctx=None):
 
             time.sleep(0.2)
 
+        if not any_quote_ok:
+            print(f"LongPort option chain for {ticker}: 全部报价失败，降级到其他数据源")
+            return []
         print(f"LongPort option chain for {ticker}: {len(all_contracts)} contracts from {len(expiry_dates[:3])} expiries")
         return all_contracts
 
@@ -2202,7 +2219,7 @@ def build_feishu_card(vix_data, scored_stocks, push_type, stock_news=None, macro
         md = "**📰 新闻速览**"
         for title, news in [("📰 市场", mn[:3]), ("💼 商业", bn[:3]), ("🌍 国际", wn[:2]), ("💻 科技", tn[:2])]:
             if news:
-                md += "\n" + " · ".join([f"[{n.get('source','?')}]" if n.get('source') else "" + n["headline"][:50] for n in news])
+                md += "\n" + " · ".join([f"[{n.get('source','?')}] {n['headline'][:50]}" for n in news])
         elements.append({"tag": "div", "text": {"tag": "lark_md", "content": md}})
         elements.append({"tag": "hr"})
 
