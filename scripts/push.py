@@ -920,6 +920,7 @@ def _finhub_stock_news(tickers, days=3):
 
 # ─── Gist 记忆体引擎（7天滚动观察列表）──────────────────────────────────────
 
+GIST_PAT = os.environ.get("GIST_PAT", "")
 GIST_ID  = os.environ.get("GIST_ID", "")
 
 def update_and_get_watchlist(today_top_tickers):
