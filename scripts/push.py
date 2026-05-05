@@ -649,10 +649,15 @@ def compute_score_reversal(quote, vix):
     return round(score)
 
 def get_signal(score):
-    if score > 72: return "强买 🔥"
-    if score > 58: return "买入 ✅"
-    if score > 42: return "中性 ➖"
-    return "回避 ⚠️"
+    if score > 72: return "强买"
+    if score > 58: return "买入"
+    if score > 42: return "中性"
+    return "回避"
+
+SIGNAL_ICON = {"强买": "🔥", "买入": "✅", "中性": "➖", "回避": "⚠️"}
+
+def get_signal_icon(signal_text):
+    return SIGNAL_ICON.get(signal_text, "⚠️")
 
 def get_option_strategy(score, vix):
     direction = "bull" if score > 65 else "neutral" if score > 45 else "bear"
@@ -1961,7 +1966,7 @@ def build_feishu_text(vix_data, scored_stocks, push_type, stock_news=None, macro
             signal_icon = "⚠️"
             signal_text = "AI降级"
         else:
-            signal_icon = "✅" if s["signal"] == "买入" else ("➖" if s["signal"] == "中性" else "❌")
+            signal_icon = get_signal_icon(s["signal"])
             signal_text = s["signal"]
         lines.append(
             f"  {i+1}. {s['ticker']} {signal_text} {signal_icon}  "
@@ -2142,9 +2147,7 @@ def build_feishu_card(vix_data, scored_stocks, push_type, stock_news=None, macro
         act = ai_r.get("action", "")
         if act == "反转为反向操作": return "⛔ AI反转"
         if act == "降级为观望":     return "⚠️ AI降级"
-        if s["signal"] == "买入":  return "✅"
-        if s["signal"] == "中性":  return "➖"
-        return "❌"
+        return get_signal_icon(s["signal"])
 
     def _top3_line(s):
         ai_r = stock_reasonings.get(s["ticker"], {}) if stock_reasonings else {}
