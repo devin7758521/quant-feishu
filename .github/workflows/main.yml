@@ -2,8 +2,8 @@ name: Quant Alpha 飞书推送
 
 on:
   schedule:
-    - cron: '47 13 * * 1-5'   # 盘前预热 21:47 BJT
-    - cron: '47 21 * * 1-5'   # 盘后总结 05:47 BJT
+    #- cron: '47 13 * * 1-5'   # 盘前预热 21:47 BJT
+    #- cron: '47 21 * * 1-5'   # 盘后总结 05:47 BJT
   workflow_dispatch:
     inputs:
       push_type:
